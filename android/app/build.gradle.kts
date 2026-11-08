@@ -32,11 +32,11 @@ android {
 
     // 云端打包（GitHub Actions）时通过环境变量 CI_KEYSTORE 指定证书文件，
     // 保证和本机 debug 证书完全一致；本机不设这个变量，走默认 debug 配置。
-    val ciKeystore = System.getenv("CI_KEYSTORE")
-    if (ciKeystore != null && file(ciKeystore).exists()) {
-        signingConfigs {
+    val ciKeystorePath = System.getenv("CI_KEYSTORE")
+    signingConfigs {
+        if (ciKeystorePath != null && file(ciKeystorePath).exists()) {
             create("ci") {
-                storeFile = file(ciKeystore)
+                storeFile = file(ciKeystorePath)
                 storePassword = System.getenv("CI_KEYSTORE_PASS") ?: "android"
                 keyAlias = System.getenv("CI_KEY_ALIAS") ?: "androiddebugkey"
                 keyPassword = System.getenv("CI_KEY_PASS") ?: "android"
@@ -46,12 +46,9 @@ android {
 
     buildTypes {
         release {
-            // 有 CI_KEYSTORE 就用它，否则用本机 debug 证书（两者其实是同一份）
-            signingConfig = if (findByName("ci") != null) {
-                signingConfigs.getByName("ci")
-            } else {
-                signingConfigs.getByName("debug")
-            }
+            // 有 ci 配置就用它，否则用本机 debug 证书（两者其实是同一份）
+            signingConfig = signingConfigs.findByName("ci") ?: signingConfigs.getByName("debug")
+            logger.lifecycle("release 使用的签名配置：${signingConfig?.name}")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
