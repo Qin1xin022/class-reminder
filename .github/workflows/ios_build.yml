@@ -1,0 +1,42 @@
+# 在 GitHub 的 macOS 云机器上把 App 打包成「未签名 ipa」。
+# 下载 ipa 后在 Windows 上用 Sideloadly + Apple ID 免费签名，即可装进 iPhone。
+# 使用方法：仓库页面 Actions → iOS Build → Run workflow
+name: iOS Build (unsigned ipa)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.9'
+          channel: stable
+          cache: true
+
+      - name: 补齐 iOS 工程文件（Podfile 等）
+        run: flutter create --platforms=ios .
+
+      - name: 拉取依赖
+        run: flutter pub get
+
+      - name: 编译 iOS（免签名）
+        run: flutter build ios --release --no-codesign
+
+      - name: 打包成 ipa
+        run: |
+          mkdir -p Payload
+          cp -R build/ios/iphoneos/Runner.app Payload/
+          zip -qry class_reminder_ios_unsigned.ipa Payload
+
+      - name: 上传 ipa
+        uses: actions/upload-artifact@v4
+        with:
+          name: class-reminder-ipa
+          path: class_reminder_ios_unsigned.ipa

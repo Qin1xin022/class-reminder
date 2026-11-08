@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="widget_overview_desc">今天几节课、还有几件待办、最近的比赛和专注时长，一屏看完</string>
+    <string name="widget_comp_desc">接下来要参加的比赛、报名截止和倒计时</string>
+    <string name="widget_idea_desc">最近记下的灵感、痛点和个人想法</string>
+    <string name="widget_focus_desc">今天和这周累计的专注时长</string>
+</resources>
