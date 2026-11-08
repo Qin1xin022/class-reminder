@@ -57,3 +57,8 @@ shots/
 ios_icon_preview.png
 s9.png
 shot.png
+
+# 云端打包时临时还原的签名证书，绝不能提交
+ci/
+*.keystore
+*.jks
