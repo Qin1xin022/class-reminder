@@ -30,11 +30,28 @@ android {
         versionName = flutter.versionName
     }
 
+    // 云端打包（GitHub Actions）时通过环境变量 CI_KEYSTORE 指定证书文件，
+    // 保证和本机 debug 证书完全一致；本机不设这个变量，走默认 debug 配置。
+    val ciKeystore = System.getenv("CI_KEYSTORE")
+    if (ciKeystore != null && file(ciKeystore).exists()) {
+        signingConfigs {
+            create("ci") {
+                storeFile = file(ciKeystore)
+                storePassword = System.getenv("CI_KEYSTORE_PASS") ?: "android"
+                keyAlias = System.getenv("CI_KEY_ALIAS") ?: "androiddebugkey"
+                keyPassword = System.getenv("CI_KEY_PASS") ?: "android"
+            }
+        }
+    }
+
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            // 有 CI_KEYSTORE 就用它，否则用本机 debug 证书（两者其实是同一份）
+            signingConfig = if (findByName("ci") != null) {
+                signingConfigs.getByName("ci")
+            } else {
+                signingConfigs.getByName("debug")
+            }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

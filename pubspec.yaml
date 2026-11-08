@@ -1,7 +1,7 @@
 name: class_reminder
 description: 课程表 + 作业/自习/工作提醒 + 笔记复盘，本地优先、离线可用。
 publish_to: 'none'
-version: 1.11.3+20
+version: 1.11.4+21
 environment:
   sdk: '>=3.3.0 <4.0.0'
 

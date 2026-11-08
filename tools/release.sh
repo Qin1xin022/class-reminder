@@ -96,12 +96,15 @@ git add -A >/dev/null 2>&1 || true
 git commit -m "release v$VER (build $CODE)" >/dev/null 2>&1 || true
 
 echo "== 6/6 推送到 GitHub（触发云端打包，生成固定下载链接）=="
+# 有些网络环境下 http_proxy 会拦住 github.com，直连反而通，所以失败后重试一次
+push_direct() { env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY "$@"; }
 if git remote get-url origin >/dev/null 2>&1; then
-  if git push origin HEAD >/dev/null 2>&1; then
+  if git push origin HEAD >/dev/null 2>&1 || push_direct git push origin HEAD >/dev/null 2>&1; then
     git tag -f "v$VER" >/dev/null 2>&1
-    if git push -f origin "v$VER" >/dev/null 2>&1; then
-      echo "  ✅ 已推送 v$VER，云端正在打包（约 5 分钟）"
+    if git push -f origin "v$VER" >/dev/null 2>&1 || push_direct git push -f origin "v$VER" >/dev/null 2>&1; then
+      echo "  ✅ 已推送 v$VER，云端正在打包（约 8 分钟）"
       echo "     下载链接：$(git remote get-url origin | sed -E 's#^.*github\.com[:/](.+)/(.+)\.git$#https://github.com/\1/\2/releases/latest/download/kebiao-latest.apk#')"
+      echo "     构建进度：https://github.com/$(git remote get-url origin | sed -E 's#^.*github\.com[:/](.+)/(.+)\.git$#\1/\2#')/actions"
     else
       echo "  ⚠️ 标签推送失败，本地安装包照样能用"
     fi

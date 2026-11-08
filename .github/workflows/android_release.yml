@@ -40,15 +40,19 @@ jobs:
           echo "tag=v$V" >> "$GITHUB_OUTPUT"
           echo "版本：$V (build $C)"
 
-      # 关键一步：必须用和本机完全相同的签名证书，
-      # 否则朋友手机上装的新版无法覆盖旧版（只能卸载重装，数据丢失）
+      # 关键一步：必须用和本机完全相同的证书，否则朋友手机上装不上新版。
+      # 证书写在仓库工作区里，由 build.gradle.kts 通过 CI_KEYSTORE 读取，
+      # 不依赖 ~/.android（GitHub 运行器上的 user.home 不一定可靠）。
       - name: 还原固定签名证书
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
         run: |
-          mkdir -p "$HOME/.android"
+          mkdir -p ci
           if [ -n "$KEYSTORE_BASE64" ]; then
-            printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$HOME/.android/debug.keystore"
+            printf '%s' "$KEYSTORE_BASE64" | base64 -d > ci/debug.keystore
+            echo "证书大小：$(stat -c%s ci/debug.keystore) 字节"
+            keytool -list -v -keystore ci/debug.keystore -storepass android -alias androiddebugkey \
+              | grep -E "SHA1|SHA-1" || true
             echo "✅ 已还原固定签名证书"
           else
             echo "::warning::仓库没有配置 KEYSTORE_BASE64 密钥，本次会用临时签名，朋友装不上！"
@@ -58,7 +62,16 @@ jobs:
         run: flutter pub get
 
       - name: 编译 release APK
+        env:
+          CI_KEYSTORE: ${{ github.workspace }}/ci/debug.keystore
         run: flutter build apk --release
+
+      - name: 校验签名指纹
+        run: |
+          APK=build/app/outputs/flutter-apk/app-release.apk
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -1)
+          "$BT/apksigner" verify --print-certs "$APK" | grep -i "SHA-1 digest" || true
+          echo "本机应为：56:1F:80:E1:E6:33:12:A1:50:B4:D7:31:FF:26:81:B9:F0:2D:6D:8D"
 
       - name: 整理安装包
         run: |
@@ -79,11 +92,11 @@ jobs:
           body: |
             课表待办 v${{ steps.ver.outputs.ver }}（build ${{ steps.ver.outputs.code }}）
 
-            **安卓手机直接点这里下载：**
-            `kebiao-latest.apk`
+            **下载地址（固定不变的链接）：**
+            https://github.com/${{ github.repository }}/releases/latest/download/kebiao-latest.apk
 
             安装方法：下载 → 点开 → 允许"未知来源"一次 → 覆盖安装。
-            课表、待办、笔记都不会丢（前提是签名与旧版一致）。
+            课表、待办、笔记都不会丢（签名与旧版一致）。
 
             数据只存在手机本地，不上传任何服务器。
           files: |
