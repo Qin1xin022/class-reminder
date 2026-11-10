@@ -9,6 +9,7 @@ import '../state/app_state.dart';
 import '../theme/tokens.dart';
 import '../utils/dates.dart';
 import 'course_edit_screen.dart';
+import 'timetable_import_screen.dart';
 
 /// 一整屏 = 一整周：行是每节课，列是周一到周日，左右滑动换周
 /// 每节课的上下课时间可在「我的 → 课程时间设置」里改（AppState.periods）。
@@ -69,7 +70,7 @@ class _TimetableScreenState extends State<TimetableScreen> with WidgetsBindingOb
         actions: [
           IconButton(
             tooltip: '导入课表',
-            onPressed: _showImportDialog,
+            onPressed: _showImportMenu,
             icon: const Icon(Icons.download_outlined),
           ),
           IconButton(
@@ -202,6 +203,15 @@ class _TimetableScreenState extends State<TimetableScreen> with WidgetsBindingOb
           ],
         );
       }),
+    );
+  }
+
+  /// 导入方式选择：内置广工课表 / 文件 / 图片识别 / 粘贴文本
+  Future<void> _showImportMenu() async {
+    final added = await showTimetableImportMenu(context);
+    if (!mounted || added == null) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('导入完成，新增 $added 门课（重复的自动跳过）')),
     );
   }
 

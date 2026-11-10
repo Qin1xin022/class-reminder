@@ -69,6 +69,9 @@ flutter {
 
 dependencies {
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
+    // ML Kit 中文离线识别模型（插件只声明 compileOnly，需要 App 自己引入；
+    // 只带中文脚本，识别完全在手机本地跑，不联网不上传）
+    implementation("com.google.mlkit:text-recognition-chinese:16.0.1")
 }
 
 // 锁定 WorkManager 到稳定版：

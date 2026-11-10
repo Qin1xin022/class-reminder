@@ -15,3 +15,9 @@
 -keep class com.dexterous.flutterlocalnotifications.** { *; }
 -dontwarn com.google.gson.**
 
+
+# ML Kit 文字识别：插件引用了日/韩/天城文脚本类，但 App 只引入中文模型，
+# 这些分支永远不会执行，用 dontwarn 抑制 R8 报错即可。
+-dontwarn com.google.mlkit.vision.text.devanagari.**
+-dontwarn com.google.mlkit.vision.text.japanese.**
+-dontwarn com.google.mlkit.vision.text.korean.**

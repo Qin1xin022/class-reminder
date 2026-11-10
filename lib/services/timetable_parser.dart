@@ -1,0 +1,366 @@
+import '../models.dart';
+
+/// 课表解析：把「教务系统的课表文本/表格/OCR 结果」变成课程草稿。
+/// 所有解析都只产出草稿（Course.id == null），导入前必须经过预览确认页，
+/// 用户可以逐条勾选、修改后再入库——识别有误差也不怕。
+
+/// 一段课表格子文本 → 结构化字段（不含星期；星期由网格列决定）
+class ParsedCell {
+  String name = '';
+  String teacher = '';
+  String location = '';
+  int weekStart = 1;
+  int weekEnd = 16;
+  int? startPeriod; // 节次（1 起）
+  int? endPeriod;
+  int? startMin; // 直接给了时间（如 08:00-09:40）则优先用
+  int? endMin;
+}
+
+final _weekRange = RegExp(r'(\d{1,2})\s*[-–—~至到]\s*(\d{1,2})\s*周');
+final _weekSingle = RegExp(r'(?:第\s*)?(\d{1,2})\s*周');
+final _weekFirst = RegExp(r'第\s*(\d{1,2})\s*周');
+final _periodRange = RegExp(r'第?\s*(\d{1,2})\s*[-–—~至到]\s*(\d{1,2})\s*节');
+final _periodSingle = RegExp(r'第\s*(\d{1,2})\s*节');
+final _timeRange = RegExp(r'(\d{1,2}):(\d{2})\s*[-–—~至到]\s*(\d{1,2}):(\d{2})');
+final _locationHint = RegExp(r'(楼|栋|室|馆|厅|操场|球场|机房|实训|报告厅|阶梯|教室|[A-Za-z]-?\d{3,4}|\b\d{3,4}\b)');
+final _teacherHint = RegExp(r'(老师|教师|教授|讲师|副教授)$');
+
+/// 「星期」列头 → 1..7
+final Map<String, int> kWeekdayWords = {
+  '周一': 1, '周二': 2, '周三': 3, '周四': 4, '周五': 5, '周六': 6, '周日': 7,
+  '星期一': 1, '星期二': 2, '星期三': 3, '星期四': 4, '星期五': 5, '星期六': 6, '星期日': 7, '星期天': 7,
+};
+
+int? weekdayFromWord(String raw) {
+  final t = raw.trim();
+  for (final e in kWeekdayWords.entries) {
+    if (t.contains(e.key)) return e.value;
+  }
+  return null;
+}
+
+/// 解析一个格子/一段课程描述文本。
+/// [text] 里可以是 「课程名\\n老师\\n1-16周\\nA栋201」 这种多行，也可以是一整行。
+ParsedCell parseCellText(String raw) {
+  final out = ParsedCell();
+  var text = raw.replaceAll('\r', '').trim();
+  if (text.isEmpty) return out;
+
+  // 1) 周次
+  final wm = _weekRange.firstMatch(text);
+  if (wm != null) {
+    out.weekStart = int.parse(wm.group(1)!);
+    out.weekEnd = int.parse(wm.group(2)!);
+  } else {
+    final wf = _weekFirst.firstMatch(text) ?? _weekSingle.firstMatch(text);
+    if (wf != null) out.weekStart = out.weekEnd = int.parse(wf.group(1)!);
+  }
+  if (out.weekEnd < out.weekStart) out.weekEnd = out.weekStart;
+  // 单周/双周：在已有区间内取奇数/偶数周
+  if (text.contains('单周')) {
+    out.weekStart = out.weekStart.isOdd ? out.weekStart : out.weekStart + 1;
+    out.weekEnd = out.weekEnd.isOdd ? out.weekEnd : out.weekEnd - 1;
+  } else if (text.contains('双周')) {
+    out.weekStart = out.weekStart.isEven ? out.weekStart : out.weekStart + 1;
+    out.weekEnd = out.weekEnd.isEven ? out.weekEnd : out.weekEnd - 1;
+  }
+  if (out.weekEnd < out.weekStart) out.weekEnd = out.weekStart;
+
+  // 2) 直接给时间的（08:00-09:40）
+  final tm = _timeRange.firstMatch(text);
+  if (tm != null) {
+    final sh = int.parse(tm.group(1)!), sm = int.parse(tm.group(2)!);
+    final eh = int.parse(tm.group(3)!), em = int.parse(tm.group(4)!);
+    if (sh < 24 && eh < 24) {
+      out.startMin = sh * 60 + sm;
+      out.endMin = eh * 60 + em;
+    }
+  }
+
+  // 3) 节次（把周次文本先摘掉，防止 “1-16周” 被误当节次）
+  var forPeriod = text.replaceAll(_weekRange, ' ').replaceAll(_weekFirst, ' ');
+  final pm = _periodRange.firstMatch(forPeriod) ?? _periodSingle.firstMatch(forPeriod);
+  if (pm != null) {
+    final a = int.tryParse(pm.group(1)!);
+    final bRaw = pm.groupCount >= 2 ? pm.group(2) : null;
+    final b = int.tryParse(bRaw ?? '') ?? a;
+    if (a != null && a >= 1 && a <= 20) {
+      out.startPeriod = a;
+      out.endPeriod = (b == null || b < a) ? a : (b > 20 ? a : b);
+    }
+  } else {
+    // 整格就是节次标签：如 “1,2节”“1、2”“第1-2节” 单独占一格
+    final cm = RegExp(r'^\s*第?\s*(\d{1,2})\s*[,，、]\s*(\d{1,2})\s*节?\s*$').firstMatch(forPeriod);
+    if (cm != null) {
+      final a = int.tryParse(cm.group(1)!);
+      final b = int.tryParse(cm.group(2)!);
+      if (a != null && a >= 1 && a <= 20) {
+        out.startPeriod = a;
+        out.endPeriod = (b != null && b >= a && b <= 20) ? b : a;
+      }
+    }
+  }
+
+  // 4) 逐行分类：课程名 / 老师 / 地点
+  final lines = text
+      .split(RegExp(r'[\n;；]+'))
+      .map((e) => e.trim())
+      .where((e) => e.isNotEmpty)
+      .toList();
+  final leftovers = <String>[];
+  for (final line0 in lines) {
+    var line = line0;
+    // 摘掉行内的周次/节次/时间片段
+    line = line
+        .replaceAll(_weekRange, ' ')
+        .replaceAll(_weekFirst, ' ')
+        .replaceAll(_periodRange, ' ')
+        .replaceAll(_periodSingle, ' ')
+        .replaceAll(_timeRange, ' ')
+        .replaceAll(RegExp(r'[(（]\s*[单双]?周?\s*[)]\)'), ' ')
+        .replaceAll(RegExp(r'(单周|双周|周次|节)'), ' ')
+        .trim();
+    line = line.replaceAll(RegExp(r'^[-–—~·,，、:：@#\s]+|[-–—~·,，、:：@#\s]+$'), '');
+    if (line.isEmpty) continue;
+    if (_teacherHint.hasMatch(line0) && line.length <= 12) {
+      out.teacher = line;
+      continue;
+    }
+    if (_locationHint.hasMatch(line0) && line.length <= 20) {
+      out.location = out.location.isEmpty ? line : out.location;
+      continue;
+    }
+    leftovers.add(line);
+  }
+  // 老师的兜底：有名字候选的前提下，形如 2~4 个汉字、且比名字短的独立短行才认，
+  // 避免把「高等数学」这种课程名当成老师
+  if (out.teacher.isEmpty && leftovers.length >= 2) {
+    final nameLen = leftovers.first.length;
+    for (final line in leftovers.skip(1)) {
+      if (RegExp(r'^[\u4e00-\u9fa5]{2,4}$').hasMatch(line) &&
+          line.length < nameLen &&
+          !kWeekdayWords.keys.any(line.contains)) {
+        out.teacher = line;
+        leftovers.remove(line);
+        break;
+      }
+    }
+  }
+  out.name = leftovers.isNotEmpty ? leftovers.first : text.split('\n').first.trim();
+  out.name = out.name
+      .replaceAll(RegExp(r'@.*$'), '')
+      .replaceAll(_weekRange, '')
+      .replaceAll(_weekFirst, '')
+      .replaceAll(_timeRange, '')
+      .trim();
+  if (out.name.length > 40) out.name = out.name.substring(0, 40);
+  return out;
+}
+
+/// 节次 → 分钟（用手机里配置的作息；超出范围的节次按 50 分钟/节往后排）
+(int, int) periodsToMinutes(int startP, int endP, List<(int, int)> periods) {
+  int at(int p) {
+    final i = p - 1;
+    if (i >= 0 && i < periods.length) return periods[i].$1;
+    return 480 + (p - 1) * 50; // 兜底：8:00 起每节 50 分钟
+  }
+  int end(int p) {
+    final i = p - 1;
+    if (i >= 0 && i < periods.length) return periods[i].$2;
+    return at(p) + 50;
+  }
+  final s = at(startP);
+  final e = endP >= startP ? end(endP) : end(startP);
+  return (s, e >= s ? e : s + 50);
+}
+
+/// 网格（行 × 列的文本矩阵）→ 课程列表。
+/// 自动找「星期」表头行确定列，每行第一列若是节次/时间标签则作为该行的节次。
+List<Course> parseGrid(List<List<String>> grid, List<(int, int)> periods) {
+  final rows = grid
+      .map((r) => r.map((c) => c.trim()).toList())
+      .where((r) => r.any((c) => c.isNotEmpty))
+      .toList();
+  if (rows.isEmpty) return const [];
+
+  // 找表头行：星期词最多的一行
+  var headerIdx = -1;
+  var headerCols = <int, int>{}; // 列号 → 星期
+  var best = 0;
+  for (var i = 0; i < rows.length && i < 6; i++) {
+    final cols = <int, int>{};
+    for (var j = 0; j < rows[i].length; j++) {
+      final wd = weekdayFromWord(rows[i][j]);
+      if (wd != null) cols[j] = wd;
+    }
+    if (cols.length > best) {
+      best = cols.length;
+      headerIdx = i;
+      headerCols = cols;
+    }
+  }
+  final out = <Course>[];
+  if (headerIdx < 0 || headerCols.length < 2) return out;
+
+  final maxCol = headerCols.keys.reduce((a, b) => a > b ? a : b);
+  for (var i = headerIdx + 1; i < rows.length; i++) {
+    final row = rows[i];
+    // 行首标签（星期列之前的格子）：节次/时间
+    int? sp, ep;
+    int? rowStartMin, rowEndMin;
+    final labelCol = headerCols.keys.reduce((a, b) => a < b ? a : b);
+    for (var j = 0; j < labelCol && j < row.length; j++) {
+      final p = parseCellText(row[j]);
+      if (p.startPeriod != null) {
+        sp = p.startPeriod;
+        ep = p.endPeriod;
+      }
+      if (p.startMin != null) {
+        rowStartMin = p.startMin;
+        rowEndMin = p.endMin;
+      }
+    }
+    if (sp == null && rowStartMin == null && row.length > maxCol) {
+      // 行标签可能就在同一格里（如 “第1-2节 高等数学”），由格子自己解析
+    }
+    for (final e in headerCols.entries) {
+      final col = e.key;
+      if (col >= row.length) continue;
+      final cell = row[col];
+      if (cell.isEmpty) continue;
+      final p = parseCellText(cell);
+      int sm, em;
+      if (p.startMin != null) {
+        sm = p.startMin!;
+        em = p.endMin!;
+      } else if (p.startPeriod != null) {
+        final t = periodsToMinutes(p.startPeriod!, p.endPeriod!, periods);
+        sm = t.$1;
+        em = t.$2;
+      } else if (sp != null) {
+        final t = periodsToMinutes(sp, ep ?? sp, periods);
+        sm = t.$1;
+        em = t.$2;
+      } else if (rowStartMin != null) {
+        sm = rowStartMin;
+        em = rowEndMin ?? rowStartMin;
+      } else {
+        continue; // 定不出时间，放弃这个格子
+      }
+      out.add(Course(
+        name: p.name.isEmpty ? cell.trim() : p.name,
+        teacher: p.teacher,
+        location: p.location,
+        weekday: e.value,
+        startMin: sm,
+        endMin: em,
+        weekStart: p.weekStart,
+        weekEnd: p.weekEnd,
+      ));
+    }
+  }
+  return out;
+}
+
+/// 自由文本（整段复制/OCR 重建的行）→ 课程列表。
+/// 支持「周一 1-16周 第1-2节 高等数学 A201」这类行；
+/// 也支持带表头的制表符/多空格分隔的伪表格。
+List<Course> parseLooseText(String text, List<(int, int)> periods) {
+  final lines = text
+      .split(RegExp(r'\r?\n'))
+      .map((e) => e.replaceAll('\r', '').trimRight()) // 保留行首空白：制表符对齐靠它
+      .where((e) => e.trim().isNotEmpty)
+      .toList();
+  if (lines.isEmpty) return const [];
+
+  // A) 伪表格：某一行 ≥2 个星期词 → 表头；后面每行按分隔符拆格子
+  for (var h = 0; h < lines.length; h++) {
+    final words = lines[h]
+        .split(RegExp(r'[\t|\s]+'))
+        .where((t) => weekdayFromWord(t) != null)
+        .length;
+    if (words >= 2) {
+      final header = lines[h].split(RegExp(r'[\t|\s]{1,}'));
+      // 用格子数对齐表头里的星期词
+      final cols = <int, int>{};
+      for (var j = 0; j < header.length; j++) {
+        final wd = weekdayFromWord(header[j]);
+        if (wd != null) cols[j] = wd;
+      }
+      if (cols.length < 2) continue;
+      final out = <Course>[];
+      for (var i = h + 1; i < lines.length; i++) {
+        final cells = lines[i].split(RegExp(r'\t|\s{2,}|\|'));
+        int? sp, ep;
+        final first = cells.isNotEmpty ? cells.first : '';
+        final p0 = parseCellText(first);
+        sp = p0.startPeriod;
+        ep = p0.endPeriod;
+        for (final e in cols.entries) {
+          if (e.key >= cells.length) continue;
+          final cell = cells[e.key].trim();
+          if (cell.isEmpty) continue;
+          final p = parseCellText(cell);
+          int sm, em;
+          if (p.startMin != null) {
+            sm = p.startMin!;
+            em = p.endMin!;
+          } else if (p.startPeriod != null) {
+            final t = periodsToMinutes(p.startPeriod!, p.endPeriod!, periods);
+            sm = t.$1;
+            em = t.$2;
+          } else if (sp != null) {
+            final t = periodsToMinutes(sp, ep ?? sp, periods);
+            sm = t.$1;
+            em = t.$2;
+          } else {
+            continue;
+          }
+          out.add(Course(
+            name: p.name.isEmpty ? cell : p.name,
+            teacher: p.teacher,
+            location: p.location,
+            weekday: e.value,
+            startMin: sm,
+            endMin: em,
+            weekStart: p.weekStart,
+            weekEnd: p.weekEnd,
+          ));
+        }
+      }
+      if (out.isNotEmpty) return out;
+    }
+  }
+
+  // B) 每行自带星期：「周一 第1-2节 1-16周 高等数学 A201」
+  final out = <Course>[];
+  for (final line in lines) {
+    final wd = weekdayFromWord(line);
+    if (wd == null) continue;
+    final p = parseCellText(line);
+    if (p.name.isEmpty) continue;
+    int sm, em;
+    if (p.startMin != null) {
+      sm = p.startMin!;
+      em = p.endMin!;
+    } else if (p.startPeriod != null) {
+      final t = periodsToMinutes(p.startPeriod!, p.endPeriod!, periods);
+      sm = t.$1;
+      em = t.$2;
+    } else {
+      continue;
+    }
+    out.add(Course(
+      name: p.name,
+      teacher: p.teacher,
+      location: p.location,
+      weekday: wd,
+      startMin: sm,
+      endMin: em,
+      weekStart: p.weekStart,
+      weekEnd: p.weekEnd,
+    ));
+  }
+  return out;
+}
