@@ -38,6 +38,15 @@ class AppState extends ChangeNotifier {
   bool darkMode = false;
   double fontScale = 1.0; // 0.85 小 / 1.0 标准 / 1.15 大
 
+  /// 作息时间：每节课 (开始分钟, 结束分钟)。存 settings 表 key=periods（JSON）。
+  /// (0,0) 表示这一节学校没有（「无」），课表网格对齐时会跳过它。
+  static const List<(int, int)> kDefaultPeriods = [
+    (510, 555), (560, 605), (625, 670), (675, 720), // 08:30 起，上午 4 节
+    (830, 875), (880, 925), (930, 975), (990, 1035), (1040, 1085), // 下午
+    (1110, 1155), (1160, 1205), (1210, 1255), // 晚上
+  ];
+  List<(int, int)> periods = List<(int, int)>.from(kDefaultPeriods);
+
   // ---------------------------------------------------------------- 读取
   Future<void> load() async {
     final db = await AppDb.I.db;
@@ -83,6 +92,9 @@ class AppState extends ChangeNotifier {
         darkMode = value == '1';
       } else if (key == 'font_scale' && value != null) {
         fontScale = double.tryParse(value) ?? 1.0;
+      } else if (key == 'periods' && value != null) {
+        final p = _parsePeriods(value);
+        if (p != null && p.isNotEmpty) periods = p;
       }
     }
     ready = true;
@@ -126,6 +138,32 @@ class AppState extends ChangeNotifier {
     fontScale = scale;
     await _saveSetting('font_scale', '$scale');
     notifyListeners();
+  }
+
+  /// 保存自定义作息（课表网格会立刻按新时间对齐）
+  Future<void> setPeriods(List<(int, int)> p) async {
+    final clean = p.where((e) => e.$1 >= 0 && e.$2 >= 0 && e.$2 >= e.$1).toList();
+    if (clean.isEmpty) return;
+    periods = clean;
+    final json = jsonEncode(periods.map((e) => [e.$1, e.$2]).toList());
+    await _saveSetting('periods', json);
+    notifyListeners();
+    syncSideEffects();
+  }
+
+  static List<(int, int)>? _parsePeriods(String raw) {
+    try {
+      final arr = jsonDecode(raw) as List;
+      final out = <(int, int)>[];
+      for (final e in arr) {
+        if (e is List && e.length >= 2 && e[0] is num && e[1] is num) {
+          out.add(((e[0] as num).toInt(), (e[1] as num).toInt()));
+        }
+      }
+      return out;
+    } catch (_) {
+      return null;
+    }
   }
 
   int get currentWeek => weekOf(DateTime.now());
@@ -1187,6 +1225,7 @@ class AppState extends ChangeNotifier {
         'theme_seed': '$themeSeed',
         'dark_mode': darkMode ? '1' : '0',
         'font_scale': '$fontScale',
+        'periods': jsonEncode(periods.map((e) => [e.$1, e.$2]).toList()),
       },
     };
     return const JsonEncoder.withIndent('  ').convert(data);
@@ -1277,7 +1316,7 @@ class AppState extends ChangeNotifier {
           await txn.insert('settings', {'key': 'term_start', 'value': st['term_start']},
               conflictAlgorithm: ConflictAlgorithm.replace);
         }
-        for (final k in ['theme_seed', 'dark_mode', 'font_scale']) {
+        for (final k in ['theme_seed', 'dark_mode', 'font_scale', 'periods']) {
           if (st[k] != null) {
             await txn.insert('settings', {'key': k, 'value': '${st[k]}'},
                 conflictAlgorithm: ConflictAlgorithm.replace);

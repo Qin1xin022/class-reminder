@@ -10,24 +10,8 @@ import '../theme/tokens.dart';
 import '../utils/dates.dart';
 import 'course_edit_screen.dart';
 
-/// 广东工业大学作息：每节 45 分钟、课间 5 分钟、每天 12 节
-/// (节次, 开始分钟, 结束分钟)
-const List<(int, int, int)> kGdutPeriods = [
-  (1, 510, 555), // 08:30-09:15
-  (2, 560, 605), // 09:20-10:05
-  (3, 625, 670), // 10:25-11:10
-  (4, 675, 720), // 11:15-12:00
-  (5, 830, 875), // 13:50-14:35
-  (6, 880, 925), // 14:40-15:25
-  (7, 930, 975), // 15:30-16:15
-  (8, 990, 1035), // 16:30-17:15
-  (9, 1040, 1085), // 17:20-18:05
-  (10, 1110, 1155), // 18:30-19:15
-  (11, 1160, 1205), // 19:20-20:05
-  (12, 1210, 1255), // 20:10-20:55
-];
-
-/// 一整屏 = 一整周：行是 12 节课，列是周一到周日，左右滑动换周
+/// 一整屏 = 一整周：行是每节课，列是周一到周日，左右滑动换周
+/// 每节课的上下课时间可在「我的 → 课程时间设置」里改（AppState.periods）。
 class TimetableScreen extends StatefulWidget {
   const TimetableScreen({super.key});
 
@@ -77,6 +61,7 @@ class _TimetableScreenState extends State<TimetableScreen> with WidgetsBindingOb
   Widget build(BuildContext context) {
     final s = context.watch<AppState>();
     final week = s.currentWeek + _weekDelta;
+    final periods = s.periods;
 
     return Scaffold(
       appBar: AppBar(
@@ -103,7 +88,7 @@ class _TimetableScreenState extends State<TimetableScreen> with WidgetsBindingOb
           Expanded(
             child: LayoutBuilder(
               builder: (ctx, cons) {
-                final rowH = (cons.maxHeight / kGdutPeriods.length).clamp(38.0, 78.0);
+                final rowH = (cons.maxHeight / periods.length).clamp(24.0, 78.0);
                 return PageView.builder(
                   controller: _pc,
                   itemCount: _center * 2 + 1,
@@ -114,6 +99,7 @@ class _TimetableScreenState extends State<TimetableScreen> with WidgetsBindingOb
                       week: s.currentWeek + (i - _center),
                       currentWeek: s.currentWeek,
                       courses: s.courses,
+                      periods: periods,
                       rowH: rowH,
                     ),
                   ),
@@ -281,29 +267,38 @@ class _WeekGrid extends StatelessWidget {
     required this.week,
     required this.currentWeek,
     required this.courses,
+    required this.periods,
     required this.rowH,
   });
 
   final int week;
   final int currentWeek;
   final List<Course> courses;
+  final List<(int, int)> periods;
   final double rowH;
 
   static const double gutter = 34;
 
-  /// 课程时间 → 覆盖的节次行区间 [first, last]
+  bool _exists((int, int) p) => p.$1 > 0 || p.$2 > 0; // (0,0) = 这一节「无」
+
+  /// 课程时间 → 覆盖的节次行区间 [first, last]（跳过「无」的行）
   (int, int) _span(int startMin, int endMin) {
-    var first = kGdutPeriods.length - 1;
-    for (var i = 0; i < kGdutPeriods.length; i++) {
-      if (startMin < kGdutPeriods[i].$3) {
+    final idx = [
+      for (var i = 0; i < periods.length; i++)
+        if (_exists(periods[i])) i
+    ];
+    if (idx.isEmpty) return (0, 0);
+    var first = idx.first;
+    for (final i in idx) {
+      if (startMin < periods[i].$2) {
         first = i;
         break;
       }
     }
-    var last = 0;
-    for (var i = kGdutPeriods.length - 1; i >= 0; i--) {
-      if (endMin > kGdutPeriods[i].$2) {
-        last = i;
+    var last = idx.last;
+    for (var i = idx.length - 1; i >= 0; i--) {
+      if (endMin > periods[idx[i]].$1) {
+        last = idx[i];
         break;
       }
     }
@@ -318,7 +313,7 @@ class _WeekGrid extends StatelessWidget {
     final monday = dateOnly(now)
         .subtract(Duration(days: now.weekday - 1))
         .add(Duration(days: (week - currentWeek) * 7));
-    final gridH = rowH * kGdutPeriods.length;
+    final gridH = rowH * periods.length;
 
     return LayoutBuilder(builder: (ctx, cons) {
       final colW = (cons.maxWidth - gutter) / 7;
@@ -356,7 +351,7 @@ class _WeekGrid extends StatelessWidget {
                 ),
               ),
             // 横线（每节之间）
-            for (var i = 0; i <= kGdutPeriods.length; i++)
+            for (var i = 0; i <= periods.length; i++)
               Positioned(
                 left: gutter,
                 right: 0,
@@ -372,7 +367,7 @@ class _WeekGrid extends StatelessWidget {
                 child: Container(width: 0.6, color: context.divider),
               ),
             // 左侧节次刻度
-            for (var i = 0; i < kGdutPeriods.length; i++)
+            for (var i = 0; i < periods.length; i++)
               Positioned(
                 left: 0,
                 width: gutter - 4,
@@ -383,12 +378,12 @@ class _WeekGrid extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
                     Text(
-                      '${kGdutPeriods[i].$1}',
+                      '${i + 1}',
                       style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: context.sub, height: 1.1),
                     ),
-                    if (rowH >= 44)
+                    if (rowH >= 44 && _exists(periods[i]))
                       Text(
-                        hhmm(kGdutPeriods[i].$2),
+                        hhmm(periods[i].$1),
                         style: TextStyle(fontSize: 7.5, color: context.faint, height: 1.2),
                       ),
                   ],
@@ -412,8 +407,7 @@ class _WeekGrid extends StatelessWidget {
     bool isThisWeek,
     DateTime now,
   ) {
-    final (first, last) = _span(c.startMin, c.endMin);
-    final lane = lanes[idx]!;
+    final (first, last) = _span(c.startMin, c.endMin);    final lane = lanes[idx]!;
     final laneCount = lane[1];
     final laneW = colW / laneCount;
     final top = first * rowH;

@@ -11,6 +11,7 @@ import '../theme/tokens.dart';
 import '../utils/dates.dart';
 import '../widgets/common.dart';
 import 'pc_sync_screen.dart';
+import 'period_settings_screen.dart';
 import 'review_hub_screen.dart';
 import 'widget_guide_screen.dart';
 
@@ -44,6 +45,21 @@ class SettingsScreen extends StatelessWidget {
                 final monday = picked.subtract(Duration(days: picked.weekday - 1));
                 await context.read<AppState>().setTermStart(monday);
               },
+            ),
+          ),
+          const SectionTitle(title: '课表'),
+          Card(
+            child: ListTile(
+              leading: Icon(Icons.schedule_rounded, color: Theme.of(context).colorScheme.primary),
+              title: const Text('课程时间设置'),
+              subtitle: Text(
+                '每节课的上下课时间、总节数，照自己学校的作息改（当前 ${s.periods.length} 节）',
+                style: const TextStyle(fontSize: 11.5),
+              ),
+              trailing: const Icon(Icons.chevron_right, size: 18),
+              onTap: () => Navigator.of(context).push(
+                MaterialPageRoute(builder: (_) => const PeriodSettingsScreen()),
+              ),
             ),
           ),
           const SectionTitle(title: '外观'),
