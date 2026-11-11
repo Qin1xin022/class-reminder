@@ -21,3 +21,10 @@
 -dontwarn com.google.mlkit.vision.text.devanagari.**
 -dontwarn com.google.mlkit.vision.text.japanese.**
 -dontwarn com.google.mlkit.vision.text.korean.**
+
+# ML Kit 文字识别：R8 混淆会破坏其内部反射/工厂，运行时报
+# NullPointerException (Object.getClass()' on a null object reference)。
+# （本项目 release 已显式关闭 R8；这些规则留作将来重新开启混淆时的保险。）
+-keep class com.google.mlkit.** { *; }
+-keep class com.google.android.gms.internal.mlkit_vision_text.** { *; }
+-keep class com.google.android.gms.internal.mlkit_vision_common.** { *; }
