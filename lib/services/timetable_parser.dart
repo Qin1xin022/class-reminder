@@ -206,11 +206,22 @@ ParsedCell parseCellText(String raw) {
 
 /// 网格（行 × 列的文本矩阵）→ 课程列表。
 /// 自动找「星期」表头行确定列，每行第一列若是节次/时间标签则作为该行的节次。
-List<Course> parseGrid(List<List<String>> grid, List<(int, int)> periods) {
-  final rows = grid
-      .map((r) => r.map((c) => c.trim()).toList())
-      .where((r) => r.any((c) => c.isNotEmpty))
-      .toList();
+/// [rowSpans]：纵向合并单元格信息，key = (行索引, 列索引)，value = 该格往下
+/// 覆盖的行数。教务导出的课表常用合并单元格表示连堂课（如「设计造型」合并
+/// 第1~4节），值只存在首行——没有跨度信息就会把它当成单节课。
+List<Course> parseGrid(
+    List<List<String>> grid, List<(int, int)> periods,
+    {Map<(int, int), int>? rowSpans}) {
+  // 过滤全空行，但保留原始行号（rowSpans 用的是原始网格的行索引）
+  final rows = <List<String>>[];
+  final origRow = <int>[];
+  for (var r = 0; r < grid.length; r++) {
+    final row = grid[r].map((c) => c.trim()).toList();
+    if (row.any((c) => c.isNotEmpty)) {
+      rows.add(row);
+      origRow.add(r);
+    }
+  }
   if (rows.isEmpty) return const [];
 
   // 找表头行：星期词最多的一行
@@ -232,12 +243,9 @@ List<Course> parseGrid(List<List<String>> grid, List<(int, int)> periods) {
   final out = <Course>[];
   if (headerIdx < 0 || headerCols.length < 2) return out;
 
-  final maxCol = headerCols.keys.reduce((a, b) => a > b ? a : b);
-  for (var i = headerIdx + 1; i < rows.length; i++) {
-    final row = rows[i];
-    // 行首标签（星期列之前的格子）：节次/时间
-    int? sp, ep;
-    int? rowStartMin, rowEndMin;
+  // 解析一行行首标签（星期列之前的格子）→ 节次/时间
+  (int?, int?, int?, int?) rowLabelOf(List<String> row) {    int? sp, ep;
+    int? rsMin, reMin;
     final labelCol = headerCols.keys.reduce((a, b) => a < b ? a : b);
     for (var j = 0; j < labelCol && j < row.length; j++) {
       final p = parseCellText(row[j]);
@@ -246,13 +254,18 @@ List<Course> parseGrid(List<List<String>> grid, List<(int, int)> periods) {
         ep = p.endPeriod;
       }
       if (p.startMin != null) {
-        rowStartMin = p.startMin;
-        rowEndMin = p.endMin;
+        rsMin = p.startMin;
+        reMin = p.endMin;
       }
     }
-    if (sp == null && rowStartMin == null && row.length > maxCol) {
-      // 行标签可能就在同一格里（如 “第1-2节 高等数学”），由格子自己解析
-    }
+    return (sp, ep, rsMin, reMin);
+  }
+
+  for (var i = headerIdx + 1; i < rows.length; i++) {
+    final row = rows[i];
+    final (sp0, ep0, rowStartMin, rowEndMin) = rowLabelOf(row);
+    final sp = sp0;
+    final ep = ep0;
     for (final e in headerCols.entries) {
       final col = e.key;
       if (col >= row.length) continue;
@@ -268,7 +281,18 @@ List<Course> parseGrid(List<List<String>> grid, List<(int, int)> periods) {
         sm = t.$1;
         em = t.$2;
       } else if (sp != null) {
-        final t = periodsToMinutes(sp, ep ?? sp, periods);
+        // 合并单元格的连堂：跨度覆盖到哪一行，结束节就取到那一行的行标签
+        var endP = ep ?? sp;
+        final span = rowSpans?[(origRow[i], col)];
+        if (span != null && span > 1) {
+          final lastRow = math.min(i + span - 1, rows.length - 1);
+          for (var k = i + 1; k <= lastRow; k++) {
+            final (sp2, ep2, _, _) = rowLabelOf(rows[k]);
+            final cand = ep2 ?? sp2;
+            if (cand != null && cand > endP) endP = cand;
+          }
+        }
+        final t = periodsToMinutes(sp, endP, periods);
         sm = t.$1;
         em = t.$2;
       } else if (rowStartMin != null) {

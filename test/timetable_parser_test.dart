@@ -216,6 +216,69 @@ void friendFormatTests() {
 
   friend2FormatTests();
   weeklyWorkbookTests();
+  mergedCellTests();
+}
+
+/// 教务导出 xlsx 常用「纵向合并单元格」表示连堂课：
+/// 值只在合并区域首行（第1节行），跨度信息靠 mergeCells 提供。
+void mergedCellTests() {
+  List<List<String>> weekGrid() => [
+        ['节次\\星期', '周一', '周二', '周三', '周四', '周五', '周六', '周日'],
+        ['第1节', '', '设计造型\n设工(东)-601', '', '', '', '', ''], // C2 合并到 C5
+        ['第2节', '', '', '', '', '', '', ''],
+        ['第3节', '', '', '', '国家安全教育\n5-102', '', '', ''], // E4 合并到 E5
+        ['第4节', '', '', '', '', '', '', ''],
+        ['第5节', '', '', '', '', '', '', ''],
+        ['第6节', '大学英语(1)\n7-303', '体育(1)', '', '', '', '', ''], // B7:B8 / C7:C8
+        ['第7节', '', '', '', '', '', '', ''],
+        ['第8节', '', '', '', '', '', '', ''],
+        ['第9节', '', '', '', '', '', '', ''],
+        ['第10节', '', '', '', '', '大学生健康教育\n5-102', '', ''], // F11:F13
+        ['第11节', '', '', '', '', '', '', ''],
+        ['第12节', '', '', '', '', '', '', ''],
+      ];
+
+  test('合并单元格：连堂课跨节到合并区域末行', () {
+    final grid = weekGrid();
+    final spans = <(int, int), int>{
+      (1, 2): 4, // C2:C5 第1-4节
+      (3, 4): 2, // E4:E5 第3-4节
+      (6, 1): 2, // B7:B8 第6-7节
+      (6, 2): 2, // C7:C8 第6-7节
+      (10, 5): 3, // F11:F13 第10-12节
+    };
+    final list = parseGrid(grid, gdut, rowSpans: spans);
+    Course find(String name, int wd) =>
+        list.firstWhere((c) => c.name.contains(name) && c.weekday == wd);
+    // 设计造型：周二第1-4节（510~720）
+    final dsg = find('设计造型', 2);
+    expect(dsg.startMin, gdut[0].$1);
+    expect(dsg.endMin, gdut[3].$2);
+    expect(dsg.location, '设工(东)-601');
+    // 国家安全教育：周四第3-4节
+    final sec = find('国家安全教育', 4);
+    expect(sec.startMin, gdut[2].$1);
+    expect(sec.endMin, gdut[3].$2);
+    // 大学英语：周一第6-7节
+    final en = find('大学英语', 1);
+    expect(en.startMin, gdut[5].$1);
+    expect(en.endMin, gdut[6].$2);
+    expect(en.location, '7-303');
+    // 体育：周二第6-7节
+    final pe = find('体育', 2);
+    expect(pe.startMin, gdut[5].$1);
+    expect(pe.endMin, gdut[6].$2);
+    // 大学生健康教育：周五第10-12节
+    final health = find('健康教育', 5);
+    expect(health.startMin, gdut[9].$1);
+    expect(health.endMin, gdut[11].$2);
+  });
+
+  test('不带 spans 时保持旧行为（格子=首行单节）', () {
+    final list = parseGrid(weekGrid(), gdut);
+    final dsg = list.firstWhere((c) => c.name.contains('设计造型') && c.weekday == 2);
+    expect(dsg.endMin, gdut[0].$2); // 只有第1节
+  });
 }
 
 /// 模拟第二位朋友的课表截图（WakeUp 风格）：
