@@ -5,6 +5,7 @@ import 'dart:ui' as ui;
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
@@ -23,10 +24,15 @@ class TimetableImportScreen extends StatefulWidget {
     super.key,
     required this.candidates,
     required this.sourceLabel,
+    this.rawOcrText = '',
   });
 
   final List<Course> candidates;
   final String sourceLabel;
+
+  /// 图片导入时 ML Kit 认出的原始文字（按位置排序），
+  /// 供用户在核对页查看/复制，识别效果不对时反馈定位问题。
+  final String rawOcrText;
 
   @override
   State<TimetableImportScreen> createState() => _TimetableImportScreenState();
@@ -48,7 +54,17 @@ class _TimetableImportScreenState extends State<TimetableImportScreen> {
     final s = context.watch<AppState>();
     final count = _sel.where((e) => e).length;
     return Scaffold(
-      appBar: AppBar(title: Text('核对课表（${widget.sourceLabel}）')),
+      appBar: AppBar(
+        title: Text('核对课表（${widget.sourceLabel}）'),
+        actions: [
+          if (widget.rawOcrText.trim().isNotEmpty)
+            IconButton(
+              tooltip: '识别原文',
+              icon: const Icon(Icons.subject_outlined),
+              onPressed: () => _showRawText(context, widget.rawOcrText),
+            ),
+        ],
+      ),
       body: Column(
         children: [
           Padding(
@@ -101,8 +117,34 @@ class _TimetableImportScreenState extends State<TimetableImportScreen> {
     );
   }
 
-  Widget _card(BuildContext context, int i) {
-    final c = _list[i];
+  void _showRawText(BuildContext context, String text) {
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('识别原文'),
+        content: SizedBox(
+          width: 360,
+          height: 340,
+          child: SingleChildScrollView(
+            child: SelectableText(text, style: const TextStyle(fontSize: 12, height: 1.5)),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Clipboard.setData(ClipboardData(text: text));
+              ScaffoldMessenger.of(ctx)
+                  .showSnackBar(const SnackBar(content: Text('已复制识别原文')));
+            },
+            child: const Text('复制'),
+          ),
+          FilledButton(onPressed: () => Navigator.of(ctx).pop(), child: const Text('关闭')),
+        ],
+      ),
+    );
+  }
+
+  Widget _card(BuildContext context, int i) {    final c = _list[i];
     final color = Color(c.color);
     return Card(
       margin: const EdgeInsets.symmetric(vertical: 3),
@@ -364,6 +406,7 @@ Future<int?> showTimetableImportMenu(BuildContext context) async {
   List<Course> list;
   String label;
   List<(int, int)>? detectedPeriods; // 图片里识别到的作息时间
+  String ocrRawText = ''; // 图片 OCR 原文（给用户查看/复制反馈用）
 
   switch (mode) {
     case 'file':
@@ -399,6 +442,7 @@ Future<int?> showTimetableImportMenu(BuildContext context) async {
         final r = await parseCourseImage(path, s.periods);
         list = r.$1;
         detectedPeriods = r.$2;
+        ocrRawText = r.$3;
       } catch (e) {
         snack.close();
         if (!context.mounted) return null;
@@ -419,6 +463,37 @@ Future<int?> showTimetableImportMenu(BuildContext context) async {
 
   if (!context.mounted) return null;
   if (list.isEmpty) {
+    if (mode == 'image' && ocrRawText.trim().isNotEmpty && context.mounted) {
+      // 图片识别没认出课程：把 OCR 原文给用户看，方便反馈问题
+      await showDialog<void>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('没认出课程'),
+          content: SizedBox(
+            width: 360,
+            height: 320,
+            child: SingleChildScrollView(
+              child: SelectableText(
+                '以下是 App 从图里认出的原始文字：\n\n$ocrRawText',
+                style: const TextStyle(fontSize: 12, height: 1.5),
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                Clipboard.setData(ClipboardData(text: ocrRawText));
+                ScaffoldMessenger.of(ctx).showSnackBar(
+                    const SnackBar(content: Text('已复制，可粘贴发给别人帮忙看')));
+              },
+              child: const Text('复制原文'),
+            ),
+            FilledButton(onPressed: () => Navigator.of(ctx).pop(), child: const Text('知道了')),
+          ],
+        ),
+      );
+      return null;
+    }
     ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
       content: Text('没认出课程。文件导入建议用 xlsx；图片尽量裁掉多余部分再试；'
           '或在教务网站全选复制课表文字，用「粘贴文本」导入。'),
@@ -454,7 +529,11 @@ Future<int?> showTimetableImportMenu(BuildContext context) async {
   if (!context.mounted) return null;
   return Navigator.of(context).push<int>(
     MaterialPageRoute(
-      builder: (_) => TimetableImportScreen(candidates: list, sourceLabel: label),
+      builder: (_) => TimetableImportScreen(
+        candidates: list,
+        sourceLabel: label,
+        rawOcrText: mode == 'image' ? ocrRawText : '',
+      ),
     ),
   );
 }
@@ -499,7 +578,8 @@ Future<String?> _pasteTextDialog(BuildContext context) {
 /// 列头锚点（周X / 今天 / 日期）→ 按列 + 行距重建网格；失败退回整段文本解析。
 /// 第二个返回值是从截图行标签里识别出的作息时间（如 08:00-08:45），
 /// 与当前设置不同时由界面询问是否应用。
-Future<(List<Course>, List<(int, int)>?)> parseCourseImage(
+/// 第三个返回值是 OCR 原始文字（按位置排序），识别不理想时给用户查看/复制反馈。
+Future<(List<Course>, List<(int, int)>?, String)> parseCourseImage(
     String path, List<(int, int)> periods) async {
   final (input, tempFile) = await _normalizedInputImage(path);
   final recognizer = TextRecognizer(script: TextRecognitionScript.chinese);
@@ -523,23 +603,41 @@ Future<(List<Course>, List<(int, int)>?)> parseCourseImage(
       raw.add(OcrTextLine(t, b.left, b.top, b.right, b.bottom));
     }
   }
-  if (raw.isEmpty) return (<Course>[], null);
+  if (raw.isEmpty) return (<Course>[], null, '');
+  raw.sort((a, b) => a.top != b.top ? a.top.compareTo(b.top) : a.left.compareTo(b.left));
+  final rawText = raw.map((l) => l.text).join('\n');
+
+  // 乱码防线：正常的课程名至少要有 2 个汉字（或 1 汉字+2 字母 / 4 字母的英文课名）。
+  // 一张课表截图不可能超过 60 门课，超了说明整屏被识别成乱码，宁可返回空。
+  bool nameLooksReal(String name) {
+    final cjk = RegExp(r'[\u4e00-\u9fff]').allMatches(name).length;
+    final latin = RegExp(r'[A-Za-z]').allMatches(name).length;
+    return cjk >= 2 || (cjk >= 1 && latin >= 2) || latin >= 4;
+  }
+
+  List<Course> sanitize(List<Course> list) {
+    final ok = list.where((c) => nameLooksReal(c.name)).toList();
+    return ok.length > 60 ? <Course>[] : ok;
+  }
 
   final anchors = headerAnchors(raw);
   if (anchors.length >= 2) {
     final (list, detected) = gridFromOcrLines(raw, anchors, periods);
-    if (list.isNotEmpty) {
+    final clean = sanitize(list);
+    if (clean.isNotEmpty) {
       // 截图自带作息时间且与当前设置不同 → 按截图时间重算，课程时间更准
       if (detected != null && !_samePeriods(detected, periods)) {
         final (list2, _) = gridFromOcrLines(raw, anchors, detected);
-        if (list2.length == list.length) return (list2, detected);
+        final clean2 = sanitize(list2);
+        if (clean2.length == clean.length) return (clean2, detected, rawText);
       }
-      return (list, detected);
+      return (clean, detected, rawText);
     }
   }
   // 兜底：合并成整段文本按自由文本解析
   final merged = mergeOcrLines(raw);
-  return (parseLooseText(merged.map((l) => l.text).join('\n'), periods), null);
+  final loose = sanitize(parseLooseText(merged.map((l) => l.text).join('\n'), periods));
+  return (loose, null, rawText);
 }
 
 bool _samePeriods(List<(int, int)> a, List<(int, int)> b) {
@@ -551,20 +649,20 @@ bool _samePeriods(List<(int, int)> a, List<(int, int)> b) {
 }
 
 /// 把任意来源的图片（HEIF/微信图/带旋转元数据的照片等）规范化成一张
-/// 普通的 PNG（长边约 1600、无 EXIF 元数据），再交给 ML Kit。
+/// 普通的 PNG（宽约 1600、无 EXIF 元数据），再交给 ML Kit。
 /// 部分机型上 `InputImage.fromFilePath` 直接喂原图会在原生层空指针
-/// 崩溃（`Object.getClass()' on a null object reference`），先用
-/// Flutter 自己解码重编码可以绕开这条坑路径。
+/// 崩溃（`Object.getClass()' on a null object reference`，整屏报错），
+/// 所以：任何情况下都不把原始文件交给 ML Kit —— 规范化失败就抛出
+/// 可读的 Dart 异常，由上层弹 SnackBar，绝不让原生层崩。
 /// 返回 (规范化后的 InputImage, 需要清理的临时文件)。
-/// 临时文件为 null 表示直接用了原图，无需清理。
 Future<(InputImage, File?)> _normalizedInputImage(String path) async {
   Uint8List bytes;
   try {
     bytes = await File(path).readAsBytes();
-  } catch (_) {
-    // 文件读不了就直接走原路径，让上层抛出可读的错误
-    return (InputImage.fromFilePath(path), null);
+  } catch (e) {
+    throw Exception('图片读不出来（$e），请重新截图后再试');
   }
+  if (bytes.isEmpty) throw Exception('图片是空的，请重新选择或截图后再试');
 
   try {
     final codec = await ui.instantiateImageCodec(
@@ -584,7 +682,8 @@ Future<(InputImage, File?)> _normalizedInputImage(String path) async {
     await norm.writeAsBytes(comp.buffer.asUint8List());
     return (InputImage.fromFilePath(norm.path), norm);
   } catch (_) {
-    // 规范化失败（如极特殊的编码）：退回原路径尝试
-    return (InputImage.fromFilePath(path), null);
+    // 规范化失败（如极特殊的编码）：不能退回原路径——部分机型会在
+    // 原生层空指针闪退，只能给出友好提示。
+    throw Exception('这张图 App 解析不了，请先截图保存成新图片再导入');
   }
 }
