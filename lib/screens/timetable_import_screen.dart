@@ -459,7 +459,7 @@ Future<String?> _pasteTextDialog(BuildContext context) {
 }
 
 /// OCR：手机本地识别，不上传。
-/// 先按「周一~周日」列头锚点重建表格；失败就退回整段文本解析。
+/// 列头锚点（周X / 今天 / 日期）→ 按列 + 行距重建网格；失败退回整段文本解析。
 Future<List<Course>> parseCourseImage(String path, List<(int, int)> periods) async {
   final (input, tempFile) = await _normalizedInputImage(path);
   final recognizer = TextRecognizer(script: TextRecognitionScript.chinese);
@@ -474,32 +474,25 @@ Future<List<Course>> parseCourseImage(String path, List<(int, int)> periods) asy
     }
   }
 
-  // 拼行：同一水平线上的 element 合并成一行（中文不插空格）
-  final lines = _mergeLines(result);
-  if (lines.isEmpty) return const [];
-
-  // 列头锚点
-  final anchors = <int, double>{}; // 星期 → x
-  for (final l in lines) {
-    final wd = weekdayFromWord(l.text);
-    if (wd == null) continue;
-    final rest = l.text.replaceAll(RegExp(r'[周一二三四五六日星期天]'), '').trim();
-    if (rest.length <= 8 && (!anchors.containsKey(wd) || l.box.center.dx < anchors[wd]!)) {
-      anchors[wd] = l.box.center.dx;
+  final raw = <OcrTextLine>[];
+  for (final block in result.blocks) {
+    for (final line in block.lines) {
+      final t = line.text.trim();
+      if (t.isEmpty) continue;
+      final b = line.boundingBox;
+      raw.add(OcrTextLine(t, b.left, b.top, b.right, b.bottom));
     }
   }
+  if (raw.isEmpty) return const [];
 
-  if (anchors.length >= 3) {
-    final list = _gridFromOcr(lines, anchors, periods);
+  final anchors = headerAnchors(raw);
+  if (anchors.length >= 2) {
+    final list = gridFromOcrLines(raw, anchors, periods);
     if (list.isNotEmpty) return list;
   }
-  return parseLooseText(lines.map((l) => l.text).join('\n'), periods);
-}
-
-class _OcrLine {
-  _OcrLine(this.text, this.box);
-  final String text;
-  final Rect box;
+  // 兜底：合并成整段文本按自由文本解析
+  final merged = mergeOcrLines(raw);
+  return parseLooseText(merged.map((l) => l.text).join('\n'), periods);
 }
 
 /// 把任意来源的图片（HEIF/微信图/带旋转元数据的照片等）规范化成一张
@@ -539,154 +532,4 @@ Future<(InputImage, File?)> _normalizedInputImage(String path) async {
     // 规范化失败（如极特殊的编码）：退回原路径尝试
     return (InputImage.fromFilePath(path), null);
   }
-}
-
-List<_OcrLine> _mergeLines(RecognizedText result) {
-  final elems = <_OcrLine>[];
-  for (final block in result.blocks) {
-    for (final line in block.lines) {
-      final box = line.boundingBox;
-      final text = line.text.trim();
-      if (text.isEmpty) continue;
-      elems.add(_OcrLine(text, box));
-    }
-  }
-  if (elems.isEmpty) return const [];
-  // 平均行高 → 聚类容差
-  final avgH = elems.map((e) => e.box.height).reduce((a, b) => a + b) / elems.length;
-  final tol = avgH * 0.6;
-  elems.sort((a, b) {
-    final d = a.box.top.compareTo(b.box.top);
-    return d != 0 ? d : a.box.left.compareTo(b.box.left);
-  });
-  final out = <_OcrLine>[];
-  var cur = <_OcrLine>[];
-  var curY = elems.first.box.center.dy;
-  void flush() {
-    if (cur.isEmpty) return;
-    cur.sort((a, b) => a.box.left.compareTo(b.box.left));
-    final buf = StringBuffer();
-    for (var i = 0; i < cur.length; i++) {
-      final t = cur[i].text;
-      final prevLatin = i > 0 && _isLatin(cur[i - 1].text);
-      final curLatin = _isLatin(t);
-      if (buf.isNotEmpty && prevLatin && curLatin) buf.write(' ');
-      buf.write(t);
-    }
-    final left = cur.map((e) => e.box.left).reduce(math.min);
-    final right = cur.map((e) => e.box.right).reduce(math.max);
-    final top = cur.map((e) => e.box.top).reduce(math.min);
-    final bottom = cur.map((e) => e.box.bottom).reduce(math.max);
-    out.add(_OcrLine(buf.toString(), Rect.fromLTRB(left, top, right, bottom)));
-    cur = <_OcrLine>[];
-  }
-
-  for (final e in elems) {
-    if (cur.isEmpty) {
-      curY = e.box.center.dy;
-    } else if ((e.box.center.dy - curY).abs() > tol) {
-      flush();
-      curY = e.box.center.dy;
-    }
-    cur.add(e);
-  }
-  flush();
-  return out;
-}
-
-bool _isLatin(String t) => RegExp(r'[A-Za-z0-9]$').hasMatch(t);
-
-/// 按列头锚点把行分到 7 列里，每列内按行距切成格子
-List<Course> _gridFromOcr(List<_OcrLine> lines, Map<int, double> anchors, List<(int, int)> periods) {
-  final sortedCols = anchors.entries.toList()..sort((a, b) => a.value.compareTo(b.value));
-  final boundaries = <double>[];
-  for (var i = 0; i + 1 < sortedCols.length; i++) {
-    boundaries.add((sortedCols[i].value + sortedCols[i + 1].value) / 2);
-  }
-  double? colOf(double x) {
-    if (x < boundaries.first) return null; // 行标签区
-    for (var i = 0; i < sortedCols.length; i++) {
-      final lo = i == 0 ? boundaries.first : boundaries[i - 1];
-      final hi = i == sortedCols.length - 1 ? double.infinity : boundaries[i];
-      if (x >= lo && x < hi) return sortedCols[i].key.toDouble();
-    }
-    return null;
-  }
-
-  final avgH = lines.map((l) => l.box.height).reduce((a, b) => a + b) / lines.length;
-  final cellGap = avgH * 1.1;
-  // 行标签（第一列左边）：节次
-  final labelLines = lines.where((l) => l.box.center.dx < boundaries.first && l.text.length <= 10).toList()
-    ..sort((a, b) => a.box.top.compareTo(b.box.top));
-
-  final byCol = <int, List<_OcrLine>>{};
-  for (final l in lines) {
-    if (anchors.entries.any((a) => l.text == a.key.toString() || weekdayFromWord(l.text) != null && l.text.length <= 8)) {
-      continue; // 列头本身
-    }
-    final col = colOf(l.box.center.dx);
-    if (col == null) continue;
-    byCol.putIfAbsent(col.toInt(), () => []).add(l);
-  }
-
-  final out = <Course>[];
-  for (final e in byCol.entries) {
-    final colLines = e.value..sort((a, b) => a.box.top.compareTo(b.box.top));
-    var group = <_OcrLine>[];
-    void flushGroup() {
-      if (group.isEmpty) return;
-      final top = group.map((g) => g.box.top).reduce(math.min);
-      final bottom = group.map((g) => g.box.bottom).reduce(math.max);
-      final text = group.map((g) => g.text).join('\n');
-      final p = parseCellText(text);
-      // 找覆盖这个 y 区间的行标签 → 节次
-      int? sp, ep;
-      for (final lab in labelLines) {
-        if (lab.box.center.dy >= top - cellGap && lab.box.center.dy <= bottom + cellGap) {
-          final lp = parseCellText(lab.text);
-          sp ??= lp.startPeriod;
-          ep ??= lp.endPeriod;
-        }
-      }
-      int sm, em;
-      if (p.startMin != null) {
-        sm = p.startMin!;
-        em = p.endMin!;
-      } else if (p.startPeriod != null) {
-        final t = periodsToMinutes(p.startPeriod!, p.endPeriod!, periods);
-        sm = t.$1;
-        em = t.$2;
-      } else if (sp != null) {
-        final t = periodsToMinutes(sp, ep ?? sp, periods);
-        sm = t.$1;
-        em = t.$2;
-      } else {
-        group = <_OcrLine>[];
-        return;
-      }
-      if (p.name.isNotEmpty && weekdayFromWord(p.name) == null) {
-        out.add(Course(
-          name: p.name,
-          teacher: p.teacher,
-          location: p.location,
-          weekday: e.key,
-          startMin: sm,
-          endMin: em,
-          weekStart: p.weekStart,
-          weekEnd: p.weekEnd,
-        ));
-      }
-      group = <_OcrLine>[];
-    }
-
-    for (final l in colLines) {
-      if (group.isNotEmpty &&
-          l.box.top - group.last.box.bottom > cellGap) {
-        flushGroup();
-      }
-      group.add(l);
-    }
-    flushGroup();
-  }
-  return out;
 }

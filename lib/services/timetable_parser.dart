@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import '../models.dart';
 
 /// 课表解析：把「教务系统的课表文本/表格/OCR 结果」变成课程草稿。
@@ -103,6 +105,9 @@ ParsedCell parseCellText(String raw) {
   }
 
   // 4) 逐行分类：课程名 / 老师 / 地点
+  // “课程名@教室”格式（部分教务 App）：@ 后面是地点
+  final atM = RegExp(r'@([^\s@]{1,30})').firstMatch(text);
+  if (atM != null) out.location = atM.group(1)!;
   final lines = text
       .split(RegExp(r'[\n;；]+'))
       .map((e) => e.trim())
@@ -110,7 +115,7 @@ ParsedCell parseCellText(String raw) {
       .toList();
   final leftovers = <String>[];
   for (final line0 in lines) {
-    var line = line0;
+    var line = line0.replaceFirst(RegExp(r'@\S*'), ' ').trim();
     // 摘掉行内的周次/节次/时间片段
     line = line
         .replaceAll(_weekRange, ' ')
@@ -127,18 +132,23 @@ ParsedCell parseCellText(String raw) {
       out.teacher = line;
       continue;
     }
-    if (_locationHint.hasMatch(line0) && line.length <= 20) {
+    // “@教室”格式下地点已经取到了，整行只可能是课程名片段
+    if (atM == null && _locationHint.hasMatch(line0) && line.length <= 20) {
       out.location = out.location.isEmpty ? line : out.location;
       continue;
     }
     leftovers.add(line);
   }
-  // 老师的兜底：有名字候选的前提下，形如 2~4 个汉字、且比名字短的独立短行才认，
-  // 避免把「高等数学」这种课程名当成老师
+  // 老师的兜底：有名字候选的前提下，形如 2~4 个汉字、以常见姓氏开头、
+  // 且比名字短的独立短行才认，避免把「高等数学」「心理健康」这种当老师
+  const kSurnames = '王李张刘陈杨赵黄周吴徐孙马朱胡郭何高林罗郑梁谢宋唐许韩冯邓'
+      '曹彭曾肖田董袁潘于蒋蔡余杜叶程苏魏吕丁任沈姚卢姜崔钟谭陆汪范金石廖贾夏'
+      '韦付方白邹孟熊秦邱江尹薛闫段雷侯龙史陶黎贺顾毛郝龚邵万钱严覃武戴莫孔向汤';
   if (out.teacher.isEmpty && leftovers.length >= 2) {
     final nameLen = leftovers.first.length;
     for (final line in leftovers.skip(1)) {
       if (RegExp(r'^[\u4e00-\u9fa5]{2,4}$').hasMatch(line) &&
+          kSurnames.contains(line[0]) &&
           line.length < nameLen &&
           !kWeekdayWords.keys.any(line.contains)) {
         out.teacher = line;
@@ -147,7 +157,8 @@ ParsedCell parseCellText(String raw) {
       }
     }
   }
-  out.name = leftovers.isNotEmpty ? leftovers.first : text.split('\n').first.trim();
+  // 课程名可能被 OCR 拆成多行（如「大学生/心理健康/教育@4-10」），拼回去
+  out.name = leftovers.isNotEmpty ? _joinOcrName(leftovers) : text.split('\n').first.trim();
   out.name = out.name
       .replaceAll(RegExp(r'@.*$'), '')
       .replaceAll(_weekRange, '')
@@ -361,6 +372,284 @@ List<Course> parseLooseText(String text, List<(int, int)> periods) {
       weekStart: p.weekStart,
       weekEnd: p.weekEnd,
     ));
+  }
+  return out;
+}
+
+/// OCR 的一行文本及其包围盒（与具体 OCR 引擎解耦，方便单元测试）
+class OcrTextLine {
+  const OcrTextLine(this.text, this.left, this.top, this.right, this.bottom);
+  final String text;
+  final double left, top, right, bottom;
+  double get cx => (left + right) / 2;
+  double get cy => (top + bottom) / 2;
+  double get height => bottom - top;
+}
+
+bool _startsLatin(String t) => RegExp(r'^[A-Za-z0-9]').hasMatch(t);
+bool _endsLatin(String t) => RegExp(r'[A-Za-z0-9]$').hasMatch(t);
+
+/// 拼接被 OCR 拆行的课程名：中文直接连，英文/数字之间补空格
+String _joinOcrName(List<String> parts) {
+  final buf = StringBuffer();
+  for (final p in parts) {
+    if (buf.isNotEmpty && _endsLatin(buf.toString()) && _startsLatin(p)) {
+      buf.write(' ');
+    }
+    buf.write(p);
+  }
+  return buf.toString();
+}
+
+/// 把 OCR 原始行按 y 聚类成「视觉行」，同一水平线上的元素合并成一行。
+/// 中文相邻不插空格，英文/数字之间补一个空格。
+List<OcrTextLine> mergeOcrLines(List<OcrTextLine> elems) {
+  if (elems.isEmpty) return const [];
+  final avgH = elems.map((e) => e.height).reduce((a, b) => a + b) / elems.length;
+  final tol = avgH * 0.6;
+  final sorted = [...elems]..sort((a, b) {
+    final d = a.top.compareTo(b.top);
+    return d != 0 ? d : a.left.compareTo(b.left);
+  });
+  final out = <OcrTextLine>[];
+  var cur = <OcrTextLine>[];
+  var curY = sorted.first.cy;
+  void flush() {
+    if (cur.isEmpty) return;
+    cur.sort((a, b) => a.left.compareTo(b.left));
+    final text = _joinOcrName(cur.map((e) => e.text).toList());
+    out.add(OcrTextLine(
+      text,
+      cur.map((e) => e.left).reduce(math.min),
+      cur.map((e) => e.top).reduce(math.min),
+      cur.map((e) => e.right).reduce(math.max),
+      cur.map((e) => e.bottom).reduce(math.max),
+    ));
+    cur = <OcrTextLine>[];
+  }
+
+  for (final e in sorted) {
+    if (cur.isNotEmpty && (e.cy - curY).abs() > tol) {
+      flush();
+      curY = e.cy;
+    }
+    cur.add(e);
+  }
+  flush();
+  return out;
+}
+
+/// 表头元素 → 星期（1~7）。支持三种写法：
+/// 「周一/星期四」字样；「11/09」日期（按当前年份推算）；「今天/今日」。
+/// 「周三列写成今天」的课表靠日期和今天兜底。
+int? weekdayFromHeaderToken(String raw) {
+  var t = raw.trim();
+  if (t.isEmpty || t.length > 14) return null;
+  final hasToday = t.contains('今天') || t.contains('今日');
+  if (hasToday) {
+    t = t.replaceAll('今天', '').replaceAll('今日', '').trim();
+  }
+  final dm = RegExp(r'(\d{1,2})\s*[/.]\s*(\d{1,2})').firstMatch(t);
+  if (dm != null) {
+    final m = int.tryParse(dm.group(1)!);
+    final d = int.tryParse(dm.group(2)!);
+    if (m != null && d != null && m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+      try {
+        final date = DateTime(DateTime.now().year, m, d);
+        // 只有当日期之外没有别的文字（或只有星期词）时才认为是表头
+        final rest = t.replaceFirst(dm.group(0)!, ' ').trim();
+        final w = rest.length <= 6 ? weekdayFromWord(rest) : null;
+        if (w != null) return w;
+        if (rest.isEmpty) return date.weekday;
+      } catch (_) {}
+    }
+    return null; // 日期夹在普通文字里（如「教404」变体），不是表头
+  }
+  if (hasToday && t.isEmpty) return DateTime.now().weekday;
+  if (t.length <= 6) return weekdayFromWord(t);
+  return null;
+}
+
+/// 从 OCR 原始行里找「星期列头」的 x 锚点。
+/// 识别不出的列（如写「今天」的周三列）按左右邻列插值补齐。
+Map<int, double> headerAnchors(List<OcrTextLine> lines) {
+  final now = DateTime.now();
+  // (weekday, x, top, priority)：字样 0 < 日期 1 < 今天 2
+  final cands = <(int, double, double, int)>[];
+  for (final l in lines) {
+    final t = l.text.trim();
+    if (t.isEmpty || t.length > 14) continue;
+    final hasToday = t.contains('今天') || t.contains('今日');
+    var rest = hasToday ? t.replaceAll('今天', '').replaceAll('今日', '').trim() : t;
+    final dm = RegExp(r'(\d{1,2})\s*[/.]\s*(\d{1,2})').firstMatch(rest);
+    int? fromDate;
+    if (dm != null) {
+      final m = int.tryParse(dm.group(1)!);
+      final d = int.tryParse(dm.group(2)!);
+      if (m != null && d != null && m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+        try {
+          fromDate = DateTime(now.year, m, d).weekday;
+        } catch (_) {}
+      }
+      rest = rest.replaceFirst(dm.group(0)!, ' ').trim();
+    }
+    final fromWord = rest.isNotEmpty && rest.length <= 6 ? weekdayFromWord(rest) : null;
+    if (fromWord != null) {
+      cands.add((fromWord, l.cx, l.top, 0));
+    } else if (fromDate != null && rest.isEmpty) {
+      cands.add((fromDate, l.cx, l.top, 1));
+    } else if (hasToday && rest.isEmpty && fromDate == null) {
+      cands.add((now.weekday, l.cx, l.top, 2));
+    }
+  }
+  if (cands.isEmpty) return const {};
+  // 同一个星期取最靠上（表头在最上面）且优先级最高的候选
+  cands.sort((a, b) {
+    final p = a.$4.compareTo(b.$4);
+    return p != 0 ? p : a.$3.compareTo(b.$3);
+  });
+  final byWd = <int, double>{};
+  for (final c in cands) {
+    byWd.putIfAbsent(c.$1, () => c.$2);
+  }
+  // 按 x 排序后，把缺的星期（如「今天」列没认出来）按位置插值补上
+  final sorted = byWd.entries.toList()..sort((a, b) => a.value.compareTo(b.value));
+  final out = <int, double>{};
+  for (var i = 0; i < sorted.length; i++) {
+    out[sorted[i].key] = sorted[i].value;
+    if (i + 1 < sorted.length) {
+      final gap = sorted[i + 1].key - sorted[i].key;
+      if (gap > 1 && gap <= 4) {
+        for (var m = sorted[i].key + 1; m < sorted[i + 1].key; m++) {
+          final f = (m - sorted[i].key) / gap;
+          out[m] = sorted[i].value + (sorted[i + 1].value - sorted[i].value) * f;
+        }
+      }
+    }
+  }
+  return out;
+}
+
+/// 行标签（节次列）→ (起始节, 结束节)。
+/// 兼容「第1-2节」「1,2节」和裸数字「1」（部分教务 App 就写个数字）。
+(int?, int?) _labelPeriods(String t) {
+  final p = parseCellText(t);
+  if (p.startPeriod != null) return (p.startPeriod, p.endPeriod);
+  final m = RegExp(r'^\D{0,6}(\d{1,2})\D{0,2}$').firstMatch(t.trim());
+  if (m != null) {
+    final v = int.tryParse(m.group(1)!);
+    if (v != null && v >= 1 && v <= 20) return (v, v);
+  }
+  return (null, null);
+}
+
+/// 按「星期列头锚点 + 行标签」把 OCR 原始行重建为课程网格。
+/// 每列内部按垂直间距切成格子（一格=一门课，可跨多行节次）。
+List<Course> gridFromOcrLines(
+    List<OcrTextLine> lines, Map<int, double> anchors, List<(int, int)> periods) {
+  final sortedCols = anchors.entries.toList()..sort((a, b) => a.value.compareTo(b.value));
+  if (sortedCols.isEmpty) return const [];
+  final boundaries = <double>[];
+  for (var i = 0; i + 1 < sortedCols.length; i++) {
+    boundaries.add((sortedCols[i].value + sortedCols[i + 1].value) / 2);
+  }
+  // 第一列的左边界：按与第二列的间距对称外推，防止第一列内容被当标签丢掉
+  final lo0 = sortedCols.length >= 2
+      ? sortedCols[0].value - (boundaries.first - sortedCols[0].value)
+      : sortedCols[0].value - 40;
+  int? colOf(double x) {
+    if (x < lo0) return null; // 节次标签区
+    for (var i = 0; i < sortedCols.length; i++) {
+      final lo = i == 0 ? lo0 : boundaries[i - 1];
+      final hi = i == sortedCols.length - 1 ? double.infinity : boundaries[i];
+      if (x >= lo && x < hi) return sortedCols[i].key;
+    }
+    return null;
+  }
+
+  final avgH = lines.map((l) => l.height).reduce((a, b) => a + b) / lines.length;
+  final cellGap = avgH * 0.8; // 格内换行间隙很小，格子之间的空隙比这大
+
+  bool isHeaderLike(OcrTextLine l) =>
+      weekdayFromHeaderToken(l.text) != null ||
+      kWeekdayWords.keys.where(l.text.contains).length >= 2;
+
+  // 行标签（第一列左边）：节次
+  final labelLines = lines.where((l) => l.cx < lo0 && l.text.length <= 10).toList()
+    ..sort((a, b) => a.top.compareTo(b.top));
+
+  final byCol = <int, List<OcrTextLine>>{};
+  for (final l in lines) {
+    if (isHeaderLike(l)) continue; // 列头本身
+    final col = colOf(l.cx);
+    if (col == null) continue;
+    byCol.putIfAbsent(col.toInt(), () => []).add(l);
+  }
+
+  final out = <Course>[];
+  for (final e in byCol.entries) {
+    final colLines = e.value..sort((a, b) => a.top.compareTo(b.top));
+    var group = <OcrTextLine>[];
+    void flushGroup() {
+      if (group.isEmpty) return;
+      final top = group.map((g) => g.top).reduce(math.min);
+      final bottom = group.map((g) => g.bottom).reduce(math.max);
+      final text = group.map((g) => g.text).join('\n');
+      final p = parseCellText(text);
+      // 找覆盖这个 y 区间的行标签 → 节次
+      int? sp, ep;
+      for (final lab in labelLines) {
+        if (lab.cy >= top - cellGap && lab.cy <= bottom + cellGap) {
+          final (lsp, lep) = _labelPeriods(lab.text);
+          if (lsp != null) {
+            if (sp == null) {
+              sp = lsp;
+              ep = lep ?? lsp;
+            } else if (lsp >= sp) {
+              // 跨多行的格子：ep 跟随范围内最后一个行标签（如 1、2 两行 → 1-2 节）
+              ep = lep ?? lsp;
+            }
+          }
+        }
+      }
+      int sm, em;
+      if (p.startMin != null) {
+        sm = p.startMin!;
+        em = p.endMin!;
+      } else if (p.startPeriod != null) {
+        final t = periodsToMinutes(p.startPeriod!, p.endPeriod!, periods);
+        sm = t.$1;
+        em = t.$2;
+      } else if (sp != null) {
+        final t = periodsToMinutes(sp, ep ?? sp, periods);
+        sm = t.$1;
+        em = t.$2;
+      } else {
+        group = <OcrTextLine>[];
+        return;
+      }
+      if (p.name.isNotEmpty && weekdayFromWord(p.name) == null) {
+        out.add(Course(
+          name: p.name,
+          teacher: p.teacher,
+          location: p.location,
+          weekday: e.key,
+          startMin: sm,
+          endMin: em,
+          weekStart: p.weekStart,
+          weekEnd: p.weekEnd,
+        ));
+      }
+      group = <OcrTextLine>[];
+    }
+
+    for (final l in colLines) {
+      if (group.isNotEmpty && l.top - group.last.bottom > cellGap) {
+        flushGroup();
+      }
+      group.add(l);
+    }
+    flushGroup();
   }
   return out;
 }

@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:class_reminder/models.dart';
 import 'package:class_reminder/services/timetable_parser.dart';
 
 final gdut = <(int, int)>[
@@ -104,5 +105,111 @@ void main() {
       expect(list.any((c) => c.name.contains('大学物理') && c.weekday == 1), true);
       expect(list.any((c) => c.name.contains('英语') && c.weekday == 2), true);
     });
+
+    friendFormatTests();
+  });
+}
+
+/// 模拟「今日校园」式课表截图（列头带日期、"今天"列、行标签是裸数字、
+/// 教室是 @xxx 格式、课程名被拆行）
+List<OcrTextLine> mockFriendTimetable() {
+  const colX = [66.0, 122.0, 180.0, 240.0, 300.0, 360.0, 418.0];
+  final lines = <OcrTextLine>[
+    const OcrTextLine('节 数', 8, 195, 30, 221),
+  ];
+  const heads = ['周一', '周二', '今天', '周四', '周五', '周六', '周日'];
+  const dates = ['11/09', '11/10', '11/11', '11/12', '11/13', '11/14', '11/15'];
+  for (var i = 0; i < 7; i++) {
+    final cx = colX[i];
+    lines.add(OcrTextLine(heads[i], cx - 16, 192, cx + 16, 218));
+    lines.add(OcrTextLine(dates[i], cx - 16, 220, cx + 16, 246));
+  }
+  for (var i = 0; i < 12; i++) {
+    final top = 232.0 + i * 56;
+    lines.add(OcrTextLine('${i + 1}', 10, top, 30, top + 26));
+  }
+  void cell(int col, int period, List<String> textLines) {
+    final cx = colX[col - 1];
+    final top = 232.0 + (period - 1) * 56 + 4;
+    for (var j = 0; j < textLines.length; j++) {
+      lines.add(OcrTextLine(textLines[j], cx - 30, top + j * 30, cx + 30, top + j * 30 + 26));
+    }
+  }
+
+  cell(1, 1, ['大学生', '心理健康', '教育@4-10']);
+  cell(2, 1, ['计算机', '系统导', '论@10-309']);
+  cell(3, 1, ['大学英语', 'III-1@10-5-03']);
+  cell(4, 1, ['高等数', '学(II)(III)', '-1@3-506']);
+  cell(1, 3, ['C 语言', '程序设计', '基础@3-3']);
+  cell(2, 3, ['大学英语', 'III-1@3-506']);
+  cell(4, 3, ['C 语言', '程序设计', '基础@3-40']);
+  cell(5, 3, ['数字电', '路与数', '字逻辑@6-50']);
+  cell(1, 5, ['计算机', '系统导', '论@7-406']);
+  cell(2, 5, ['数字电', '路与数', '字逻辑@1-50']);
+  cell(4, 5, ['C 语言', '程序设计', '基础@2-30']);
+  cell(5, 5, ['计算机', '系统导', '论@7-406']);
+  cell(1, 7, ['数字电', '路与数', '字逻辑@6-50']);
+  cell(2, 7, ['排球俱', '乐部-1', '@排球场']);
+  cell(4, 7, ['形势与', '政策-1', '@3-202']);
+  cell(1, 9, ['思想道', '德与法', '治@5-302']);
+  cell(2, 9, ['大学生', '职业发展', '与就业指导']);
+  cell(3, 9, ['排球第', '一课堂', '@一啪']);
+  cell(4, 9, ['礼仪培', '训@4-201']);
+  return lines;
+}
+
+void friendFormatTests() {
+  test('课程名@教室：名字被拆行也能拼回，@ 后面是地点', () {
+    final p = parseCellText('大学生\n心理健康\n教育@4-10');
+    expect(p.name, '大学生心理健康教育');
+    expect(p.location, '4-10');
+    expect(p.weekStart, 1);
+    expect(p.weekEnd, 16); // 没写周次时默认整学期
+  });
+
+  test('裸数字行标签 + 「今天」列头 + 日期列头的课表截图', () {
+    final lines = mockFriendTimetable();
+    final anchors = headerAnchors(lines);
+    // 7 列全部认出来，「今天」列按日期 11/11 推算出星期
+    expect(anchors.length, 7);
+    final wed = DateTime(DateTime.now().year, 11, 11).weekday;
+    expect(anchors[3], isNotNull); // 周三列存在
+
+    final list = gridFromOcrLines(lines, anchors, gdut);
+    expect(list.length, 19);
+
+    Course find(String name, int wd) =>
+        list.firstWhere((c) => c.name == name && c.weekday == wd);
+
+    final pe = find('大学生心理健康教育', 1);
+    expect(pe.startMin, 510);
+    expect(pe.endMin, 605); // 第1-2节
+    expect(pe.location, '4-10');
+
+    final en = find('大学英语III-1', wed); // 「今天」列 = 周三
+    expect(en.startMin, 510);
+    expect(en.location, '10-5-03');
+
+    final c1 = find('C 语言程序设计基础', 1);
+    expect(c1.startMin, 625); // 第3-4节
+    expect(c1.endMin, 720);
+    expect(c1.location, '3-3');
+
+    final cs = list.where((c) => c.name == 'C 语言程序设计基础' && c.weekday == 4).toList();
+    expect(cs.length, 2);
+    expect(cs[0].startMin, 625); // 第3-4节
+    expect(cs[0].endMin, 720);
+    expect(cs[0].location, '3-40');
+    expect(cs[1].startMin, 830); // 第5-6节
+    expect(cs[1].endMin, 925);
+    expect(cs[1].location, '2-30');
+  });
+
+  test('日期夹在文字里不会误判成列头', () {
+    expect(weekdayFromHeaderToken('礼仪培训@4-201'), isNull);
+    expect(weekdayFromHeaderToken('教404'), isNull);
+    expect(weekdayFromHeaderToken('周一'), 1);
+    expect(weekdayFromHeaderToken('11/09'), DateTime(DateTime.now().year, 11, 9).weekday);
+    expect(weekdayFromHeaderToken('今天'), DateTime.now().weekday);
   });
 }

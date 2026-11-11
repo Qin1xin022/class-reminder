@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>课表待办 v1.13.1 下载</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: linear-gradient(160deg, #eef4ff 0%, #f7f4ef 100%);
+    min-height: 100vh;
+    display: flex; align-items: center; justify-content: center;
+    padding: 24px;
+  }
+  .card {
+    background: #fff; border-radius: 20px; padding: 36px 28px;
+    max-width: 420px; width: 100%;
+    box-shadow: 0 8px 32px rgba(50, 70, 120, .12);
+    text-align: center;
+  }
+  .icon { font-size: 56px; }
+  h1 { font-size: 22px; color: #1f2937; margin: 12px 0 6px; }
+  .ver { color: #6b7280; font-size: 14px; margin-bottom: 24px; }
+  .btn {
+    display: block; width: 100%; padding: 16px; border-radius: 14px;
+    background: linear-gradient(135deg, #4f7cff, #7a5cff);
+    color: #fff; font-size: 17px; font-weight: 600;
+    text-decoration: none; letter-spacing: 1px;
+    box-shadow: 0 4px 14px rgba(79, 124, 255, .35);
+  }
+  .btn:active { transform: scale(.98); }
+  .meta { margin-top: 14px; color: #9ca3af; font-size: 12.5px; }
+  ol {
+    text-align: left; margin: 24px auto 0; padding-left: 20px;
+    color: #4b5563; font-size: 14px; line-height: 2;
+  }
+  .tip {
+    margin-top: 18px; padding: 12px; border-radius: 10px;
+    background: #fff7ed; color: #92600a; font-size: 12.5px; line-height: 1.8;
+  }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="icon">📅</div>
+    <h1>课表待办</h1>
+    <div class="ver">v1.13.1（build 25）· 95MB · Android</div>
+    <a class="btn" id="dl" href="kebiao-latest.apk">⬇ 下载安装包</a>
+    <div class="meta">下载后请勿用微信直接打开，用系统浏览器下载</div>
+    <ol>
+      <li>点击上面的按钮下载（约 95MB，建议 Wi-Fi）</li>
+      <li>下载完成后点开文件，允许「未知来源 / 可能有害」</li>
+      <li>安装完成后打开，之前的数据不会丢</li>
+    </ol>
+    <div class="tip">v1.13.1 更新：修复部分手机「图片导入课表」闪退的问题。<br>
+    包体较大是因为内置了离线中文识别模型，识别不联网、不上传。</div>
+  </div>
+  <script>
+    // 本站链接带访问参数（sharecode），把它原样带到下载地址上，
+    // 否则直接点相对路径会被拒
+    document.getElementById('dl').href =
+      'kebiao-latest.apk' + window.location.search;
+  </script>
+</body>
+</html>
