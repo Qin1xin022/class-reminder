@@ -46,6 +46,12 @@ android {
 
     buildTypes {
         release {
+            // AGP 9 起 release 默认开启 R8 混淆压缩（无需 isMinifyEnabled），
+            // 多次把 ML Kit / WorkManager / Gson 的反射与内部类混淆出运行时空
+            // 指针闪退（如图片识别 Native NPE）。本项目是开源小工具，混淆收益
+            // 极小、稳定优先，显式关闭 R8。
+            isMinifyEnabled = false
+            isShrinkResources = false
             // 有 ci 配置就用它，否则用本机 debug 证书（两者其实是同一份）
             signingConfig = signingConfigs.findByName("ci") ?: signingConfigs.getByName("debug")
             logger.lifecycle("release 使用的签名配置：${signingConfig?.name}")
