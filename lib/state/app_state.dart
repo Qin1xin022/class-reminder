@@ -231,6 +231,46 @@ class AppState extends ChangeNotifier {
     await load();
   }
 
+  /// 批量删除课程（清空课表用）。返回真正被删掉的课程，供撤销时恢复。
+  Future<List<Course>> deleteCourses(Iterable<int> ids) async {
+    final idList = ids.whereType<int>().toSet().toList();
+    if (idList.isEmpty) return const [];
+    final removed = courses.where((c) => c.id != null && idList.contains(c.id)).toList();
+    if (removed.isEmpty) return const [];
+    final db = await AppDb.I.db;
+    final marks = List.filled(idList.length, '?').join(',');
+    await db.delete('courses', where: 'id IN ($marks)', whereArgs: idList);
+    // 关联任务保留，只解除课程引用
+    await db.update('tasks', {'course_id': null},
+        where: 'course_id IN ($marks)', whereArgs: idList);
+    await load();
+    return removed;
+  }
+
+  /// 撤销批量删除：按原 id 写回（id 刚被删掉，不会冲突）。
+  Future<void> restoreCourses(List<Course> list) async {
+    if (list.isEmpty) return;
+    final db = await AppDb.I.db;
+    for (final c in list) {
+      await db.insert('courses', c.toMap());
+    }
+    await load();
+  }
+
+  /// 某个月覆盖到的周次范围（1 号所在周 ~ 月末所在周）。
+  (int, int) weeksOfMonth(DateTime month) {
+    final first = DateTime(month.year, month.month, 1);
+    final last = DateTime(month.year, month.month + 1, 0);
+    final a = weekOf(first);
+    final b = weekOf(last);
+    return (a <= b ? a : b, a <= b ? b : a);
+  }
+
+  /// 周次范围 [wStart, wEnd] 内会上课的课程。
+  List<Course> coursesInWeeks(int wStart, int wEnd) => courses
+      .where((c) => c.weekStart <= wEnd && c.weekEnd >= wStart)
+      .toList();
+
   Future<int> saveTask(TaskItem t) async {
     final db = await AppDb.I.db;
     int id;

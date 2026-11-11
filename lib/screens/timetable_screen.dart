@@ -80,6 +80,25 @@ class _TimetableScreenState extends State<TimetableScreen> with WidgetsBindingOb
             ),
             icon: const Icon(Icons.add),
           ),
+          PopupMenuButton<String>(
+            tooltip: '更多',
+            icon: const Icon(Icons.more_vert),
+            onSelected: (v) {
+              if (v == 'clear') _showClearSheet();
+            },
+            itemBuilder: (_) => const [
+              PopupMenuItem(
+                value: 'clear',
+                child: Row(
+                  children: [
+                    Icon(Icons.delete_sweep_outlined, size: 20),
+                    SizedBox(width: 10),
+                    Text('清空课表'),
+                  ],
+                ),
+              ),
+            ],
+          ),
         ],
       ),
       body: Column(
@@ -212,6 +231,158 @@ class _TimetableScreenState extends State<TimetableScreen> with WidgetsBindingOb
     if (!mounted || added == null) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text('导入完成，新增 $added 门课（重复的自动跳过）')),
+    );
+  }
+
+  /// 清空课表：本周 / 本月 / 本学期三档，删完 6 秒内可撤销。
+  Future<void> _showClearSheet() async {
+    final s = context.read<AppState>();
+    if (s.courses.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('课表是空的，没有可清理的课程')),
+      );
+      return;
+    }
+    final now = DateTime.now();
+    final curWeek = s.currentWeek;
+    final (mStart, mEnd) = s.weeksOfMonth(now);
+    final weekCount = s.coursesInWeeks(curWeek, curWeek).length;
+    final monthCount = s.coursesInWeeks(mStart, mEnd).length;
+    final totalCount = s.courses.length;
+
+    final scope = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Padding(
+              padding: EdgeInsets.fromLTRB(20, 0, 20, 2),
+              child: Text('清空课表',
+                  style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700)),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 0, 20, 10),
+              child: Text(
+                '导入错了想重来？选择要清理的范围',
+                style: TextStyle(fontSize: 12.5, color: ctx.faint),
+              ),
+            ),
+            _clearTile(ctx, 'week', Icons.today_outlined, '本周',
+                '第 $curWeek 周会上课的课程', weekCount),
+            _clearTile(ctx, 'month', Icons.calendar_month_outlined, '本月',
+                '${now.year}年${now.month}月（第 $mStart-$mEnd 周）会上课的课程', monthCount),
+            _clearTile(ctx, 'term', Icons.delete_sweep_outlined, '整个学期',
+                '清空全部课程，重新导入时用这个', totalCount, danger: true),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+    if (!mounted || scope == null) return;
+    await _confirmClear(scope);
+  }
+
+  Widget _clearTile(BuildContext ctx, String value, IconData icon, String title,
+      String subtitle, int count, {bool danger = false}) {
+    final enabled = count > 0;
+    final color = danger ? const Color(0xFFD93F3F) : Theme.of(ctx).colorScheme.primary;
+    return ListTile(
+      enabled: enabled,
+      leading: Icon(icon, size: 22, color: enabled ? color : ctx.faint),
+      title: Text(title,
+          style: TextStyle(
+              fontSize: 15,
+              fontWeight: FontWeight.w600,
+              color: enabled ? null : ctx.faint)),
+      subtitle: Text(subtitle,
+          style: TextStyle(fontSize: 11.5, color: ctx.faint, height: 1.3)),
+      trailing: Text(
+        '$count 门',
+        style: TextStyle(
+            fontSize: 12.5,
+            fontWeight: FontWeight.w700,
+            color: enabled ? color : ctx.faint),
+      ),
+      onTap: enabled ? () => Navigator.of(ctx).pop(value) : null,
+    );
+  }
+
+  Future<void> _confirmClear(String scope) async {
+    final s = context.read<AppState>();
+    final now = DateTime.now();
+    final curWeek = s.currentWeek;
+    final List<Course> targets;
+    final String label;
+    switch (scope) {
+      case 'week':
+        targets = s.coursesInWeeks(curWeek, curWeek);
+        label = '第 $curWeek 周';
+      case 'month':
+        final (a, b) = s.weeksOfMonth(now);
+        targets = s.coursesInWeeks(a, b);
+        label = '${now.year}年${now.month}月';
+      default:
+        targets = List<Course>.from(s.courses);
+        label = '整个学期';
+    }
+    if (targets.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('这个范围里没有课程')),
+      );
+      return;
+    }
+    const warnColor = Color(0xFFD93F3F);
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('清空$label的课表？'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('将删除 ${targets.length} 门课程。',
+                style: const TextStyle(fontWeight: FontWeight.w600)),
+            const SizedBox(height: 10),
+            if (scope != 'term')
+              Text(
+                '注意：课表里的长期课（如 1-16 周）每周都会出现，删掉后其他周也会一起消失。只想删某几门课，点课程格进编辑页单独删除即可。',
+                style: TextStyle(fontSize: 12.5, color: ctx.faint, height: 1.45),
+              ),
+            if (scope == 'term')
+              Text(
+                '课程备注、老师提醒、链接会一起删除；关联的任务会保留，只解除课程关联。',
+                style: TextStyle(fontSize: 12.5, color: ctx.faint, height: 1.45),
+              ),
+            const SizedBox(height: 10),
+            const Text('删除后 6 秒内可点「撤销」恢复。',
+                style: TextStyle(fontSize: 12, color: warnColor)),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('取消')),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: warnColor),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    final removed = await s.deleteCourses(targets.map((c) => c.id).whereType<int>());
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('已清空 $label：删除 ${removed.length} 门课程'),
+        duration: const Duration(seconds: 6),
+        action: SnackBarAction(
+          label: '撤销',
+          onPressed: () => s.restoreCourses(removed),
+        ),
+      ),
     );
   }
 
