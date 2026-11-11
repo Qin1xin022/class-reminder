@@ -523,7 +523,7 @@ Future<(List<Course>, List<(int, int)>?)> parseCourseImage(
       raw.add(OcrTextLine(t, b.left, b.top, b.right, b.bottom));
     }
   }
-  if (raw.isEmpty) return (const [], null);
+  if (raw.isEmpty) return (<Course>[], null);
 
   final anchors = headerAnchors(raw);
   if (anchors.length >= 2) {
