@@ -175,7 +175,7 @@ void friendFormatTests() {
     final wed = DateTime(DateTime.now().year, 11, 11).weekday;
     expect(anchors[3], isNotNull); // 周三列存在
 
-    final list = gridFromOcrLines(lines, anchors, gdut);
+    final (list, _) = gridFromOcrLines(lines, anchors, gdut);
     expect(list.length, 19);
 
     Course find(String name, int wd) =>
@@ -211,5 +211,131 @@ void friendFormatTests() {
     expect(weekdayFromHeaderToken('周一'), 1);
     expect(weekdayFromHeaderToken('11/09'), DateTime(DateTime.now().year, 11, 9).weekday);
     expect(weekdayFromHeaderToken('今天'), DateTime.now().weekday);
+  });
+
+  friend2FormatTests();
+}
+
+/// 模拟第二位朋友的课表截图（WakeUp 风格）：
+/// 行标签是「节次数字 + 起止时间」竖排、教室号被换行拆开（@南霄3 / 27）、
+/// 格子紧贴着排（无空隙）、跨 2~3 节的大格子、还有一个「+」按钮。
+List<OcrTextLine> mockFriend2Timetable() {
+  const colX = [66.0, 122.0, 180.0, 240.0, 300.0, 360.0, 418.0];
+  final lines = <OcrTextLine>[
+    const OcrTextLine('第9周', 160, 78, 230, 106), // 顶部标题，应被忽略
+  ];
+  const heads = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
+  const dates = ['11/09', '11/10', '11/11', '11/12', '11/13', '11/14', '11/15'];
+  for (var i = 0; i < 7; i++) {
+    final cx = colX[i];
+    lines.add(OcrTextLine(heads[i], cx - 16, 118, cx + 16, 144));
+    lines.add(OcrTextLine(dates[i], cx - 16, 146, cx + 16, 172));
+  }
+  // 每行行高不一样（1-6 节高、7-8 节矮、9-10 节最高），时间是 45 分钟/节
+  const times = [
+    ['08:00', '08:45'], ['08:46', '09:30'], ['09:35', '10:20'],
+    ['10:31', '11:15'], ['11:30', '12:15'], ['12:16', '13:00'],
+    ['13:15', '14:00'], ['14:01', '14:45'], ['14:46', '15:30'],
+    ['15:45', '16:30'], ['16:31', '17:15'], ['17:16', '18:00'],
+    ['18:15', '19:00'],
+  ];
+  const rowH = [76.0, 76.0, 76.0, 76.0, 76.0, 76.0, 62.0, 62.0, 88.0, 88.0, 62.0, 62.0, 62.0];
+  final rowTop = <double>[232];
+  for (var i = 1; i < rowH.length; i++) {
+    rowTop.add(rowTop.last + rowH[i - 1]);
+  }
+  double rowTopOf(int p) => rowTop[p - 1];
+  for (var i = 0; i < 13; i++) {
+    final top = rowTop[i];
+    lines.add(OcrTextLine('${i + 1}', 10, top, 30, top + 26));
+    lines.add(OcrTextLine(times[i][0], 2, top + 28, 48, top + 50));
+    lines.add(OcrTextLine(times[i][1], 2, top + 54, 48, top + 76));
+  }
+  // 格子紧贴：文字行间距 28，块与块之间无空隙
+  void cell(int col, int startP, List<String> textLines) {
+    final cx = colX[col - 1];
+    final top = rowTopOf(startP) + 4;
+    for (var j = 0; j < textLines.length; j++) {
+      lines.add(OcrTextLine(textLines[j], cx - 30, top + j * 28, cx + 30, top + j * 28 + 24));
+    }
+  }
+
+  cell(1, 3, ['大学英语1', '@行知21', '9']);
+  cell(1, 9, ['体育1']);
+  cell(2, 1, ['军事理论', '@南霄3', '27']);
+  cell(2, 3, ['思想道', '德与法', '治@南教2', '20']); // 跨 3 节的大格子
+  cell(2, 7, ['高等', '数学C', '@南高2', '41']);
+  cell(4, 1, ['计算', '思维', '@燕宾5', '05']);
+  cell(4, 3, ['国家', '安全', '教育', '@临风3', '20']);
+  cell(4, 7, ['管理', '学', '@南商1', '02']);
+  cell(4, 9, ['中国', '画鉴', '赏与', '实践', '@楼观1', '02']);
+  cell(5, 3, ['高等', '数学C', '@南高2', '41']);
+  cell(5, 5, ['大学', '英语1', '@南语5', '05']);
+  cell(5, 9, ['政治', '经济', '学', '@馆实31', '7']);
+  cell(6, 8, ['+']); // 「添加课程」按钮，不应被当成课程
+  return lines;
+}
+
+void friend2FormatTests() {
+  test('紧贴格子 + 换行拆开的门牌号 + 「+」按钮的课表截图', () {
+    final lines = mockFriend2Timetable();
+    final anchors = headerAnchors(lines);
+    expect(anchors.length, 7);
+
+    final (list, detected) = gridFromOcrLines(lines, anchors, gdut);
+    // 12 门课，「+」不算
+    expect(list.length, 12);
+
+    Course find(String name, int wd) =>
+        list.firstWhere((c) => c.name == name && c.weekday == wd);
+
+    // 教室号被换行拆开也能拼回去
+    final mil = find('军事理论', 2);
+    expect(mil.startMin, 510); // 第1-2节
+    expect(mil.endMin, 605);
+    expect(mil.location, '南霄327');
+
+    // 名字被拆行 + @ 在行中间
+    final ide = find('思想道德与法治', 2);
+    expect(ide.location, '南教220');
+    expect(ide.startMin, 625); // 第3节起
+    expect(ide.endMin, 720); // 文字只盖到第4节行标签（3 节连堂识别为 2 节，核对页可改）
+
+    final calc = find('计算思维', 4);
+    expect(calc.location, '燕宾505');
+    expect(calc.startMin, 510);
+
+    final pe = find('体育1', 1); // 没有教室
+    expect(pe.location, '');
+    expect(pe.startMin, 1040); // 第9-10节
+
+    final engFri = find('大学英语1', 5);
+    expect(engFri.location, '南语505');
+    expect(engFri.startMin, 830); // 第5-6节
+    expect(engFri.endMin, 925);
+
+    final pol = find('政治经济学', 5);
+    expect(pol.location, '馆实317');
+    expect(pol.startMin, 1040);
+
+    expect(find('管理学', 4).location, '南商102');
+    expect(find('中国画鉴赏与实践', 4).location, '楼观102');
+    expect(find('国家安全教育', 4).location, '临风320');
+    expect(find('高等数学C', 2).location, '南高241');
+    expect(find('高等数学C', 5).startMin, 625);
+    expect(find('大学英语1', 1).location, '行知219');
+
+    // 没把「+」或标题当成课程
+    expect(list.where((c) => c.name == '+'), isEmpty);
+    expect(list.any((c) => c.weekday == 3), isFalse);
+    expect(list.any((c) => c.weekday == 6), isFalse);
+
+    // 从行标签识别出了作息时间（13 节，45 分钟/节）
+    expect(detected, isNotNull);
+    expect(detected!.length, 13);
+    expect(detected[0], (480, 525)); // 08:00-08:45
+    expect(detected[1], (526, 570)); // 08:46-09:30
+    expect(detected[8], (886, 930)); // 14:46-15:30
+    expect(detected[12], (1095, 1140)); // 18:15-19:00
   });
 }

@@ -363,6 +363,7 @@ Future<int?> showTimetableImportMenu(BuildContext context) async {
   final s = context.read<AppState>();
   List<Course> list;
   String label;
+  List<(int, int)>? detectedPeriods; // 图片里识别到的作息时间
 
   switch (mode) {
     case 'file':
@@ -395,7 +396,9 @@ Future<int?> showTimetableImportMenu(BuildContext context) async {
         const SnackBar(content: Text('正在识别（手机本地，不上传）…'), duration: Duration(seconds: 20)),
       );
       try {
-        list = await parseCourseImage(path, s.periods);
+        final r = await parseCourseImage(path, s.periods);
+        list = r.$1;
+        detectedPeriods = r.$2;
       } catch (e) {
         snack.close();
         if (!context.mounted) return null;
@@ -423,11 +426,45 @@ Future<int?> showTimetableImportMenu(BuildContext context) async {
     ));
     return null;
   }
+  // 截图带作息时间（如「1 08:00 08:45」）且与当前设置不同：问一下要不要按它更新
+  if (detectedPeriods != null && context.mounted && !_samePeriodsLocal(detectedPeriods!, s.periods)) {
+    final preview = <String>[];
+    for (var i = 0; i < detectedPeriods!.length && preview.length < 3; i++) {
+      final p = detectedPeriods![i];
+      preview.add('第${i + 1}节 ${hhmm(p.$1)}-${hhmm(p.$2)}');
+    }
+    final apply = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('识别到作息时间'),
+        content: Text(
+          '截图里带的作息时间和当前设置不一样：\n${preview.join('、')}…\n\n'
+          '要按截图更新「课程时间设置」吗？不更新也能导入，只是显示的上下课时间按当前设置算。',
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('不应用')),
+          FilledButton(onPressed: () => Navigator.of(ctx).pop(true), child: const Text('应用')),
+        ],
+      ),
+    );
+    if (apply == true) {
+      await s.setPeriods(detectedPeriods!);
+    }
+  }
+  if (!context.mounted) return null;
   return Navigator.of(context).push<int>(
     MaterialPageRoute(
       builder: (_) => TimetableImportScreen(candidates: list, sourceLabel: label),
     ),
   );
+}
+
+bool _samePeriodsLocal(List<(int, int)> a, List<(int, int)> b) {
+  if (a.length != b.length) return false;
+  for (var i = 0; i < a.length; i++) {
+    if (a[i] != b[i]) return false;
+  }
+  return true;
 }
 
 Future<String?> _pasteTextDialog(BuildContext context) {
@@ -460,7 +497,10 @@ Future<String?> _pasteTextDialog(BuildContext context) {
 
 /// OCR：手机本地识别，不上传。
 /// 列头锚点（周X / 今天 / 日期）→ 按列 + 行距重建网格；失败退回整段文本解析。
-Future<List<Course>> parseCourseImage(String path, List<(int, int)> periods) async {
+/// 第二个返回值是从截图行标签里识别出的作息时间（如 08:00-08:45），
+/// 与当前设置不同时由界面询问是否应用。
+Future<(List<Course>, List<(int, int)>?)> parseCourseImage(
+    String path, List<(int, int)> periods) async {
   final (input, tempFile) = await _normalizedInputImage(path);
   final recognizer = TextRecognizer(script: TextRecognitionScript.chinese);
   final RecognizedText result;
@@ -483,16 +523,31 @@ Future<List<Course>> parseCourseImage(String path, List<(int, int)> periods) asy
       raw.add(OcrTextLine(t, b.left, b.top, b.right, b.bottom));
     }
   }
-  if (raw.isEmpty) return const [];
+  if (raw.isEmpty) return (const [], null);
 
   final anchors = headerAnchors(raw);
   if (anchors.length >= 2) {
-    final list = gridFromOcrLines(raw, anchors, periods);
-    if (list.isNotEmpty) return list;
+    final (list, detected) = gridFromOcrLines(raw, anchors, periods);
+    if (list.isNotEmpty) {
+      // 截图自带作息时间且与当前设置不同 → 按截图时间重算，课程时间更准
+      if (detected != null && !_samePeriods(detected, periods)) {
+        final (list2, _) = gridFromOcrLines(raw, anchors, detected);
+        if (list2.length == list.length) return (list2, detected);
+      }
+      return (list, detected);
+    }
   }
   // 兜底：合并成整段文本按自由文本解析
   final merged = mergeOcrLines(raw);
-  return parseLooseText(merged.map((l) => l.text).join('\n'), periods);
+  return (parseLooseText(merged.map((l) => l.text).join('\n'), periods), null);
+}
+
+bool _samePeriods(List<(int, int)> a, List<(int, int)> b) {
+  if (a.length != b.length) return false;
+  for (var i = 0; i < a.length; i++) {
+    if (a[i] != b[i]) return false;
+  }
+  return true;
 }
 
 /// 把任意来源的图片（HEIF/微信图/带旋转元数据的照片等）规范化成一张

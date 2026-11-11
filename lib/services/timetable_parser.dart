@@ -105,19 +105,33 @@ ParsedCell parseCellText(String raw) {
   }
 
   // 4) 逐行分类：课程名 / 老师 / 地点
-  // “课程名@教室”格式（部分教务 App）：@ 后面是地点
-  final atM = RegExp(r'@([^\s@]{1,30})').firstMatch(text);
-  if (atM != null) out.location = atM.group(1)!;
+  // “课程名@教室”格式（部分教务 App）：@ 后面是地点。
+  // 门牌号可能被 OCR 换行拆开（如 “@南霄3” / “27”），纯数字短行要续接回去。
+  final atM = RegExp(r'@([^@\n]{1,30})').firstMatch(text);
+  if (atM != null) {
+    out.location = atM.group(1)!;
+  }
   final lines = text
       .split(RegExp(r'[\n;；]+'))
       .map((e) => e.trim())
       .where((e) => e.isNotEmpty)
       .toList();
   final leftovers = <String>[];
+  var seenAt = false; // 本格已出现过「@教室」行
   for (final line0 in lines) {
-    var line = line0.replaceFirst(RegExp(r'@\S*'), ' ').trim();
-    // 摘掉行内的周次/节次/时间片段
-    line = line
+    // 「@教室」行：@ 后面的内容已在 atM 里；@ 前面若还有文字则是课程名片段
+    if (line0.contains('@')) {
+      seenAt = true;
+      final before = line0.substring(0, line0.indexOf('@')).trim();
+      if (before.isNotEmpty) leftovers.add(before);
+      continue;
+    }
+    // 换行拆开的门牌号：@ 行之后的纯数字短行续接地点
+    if (seenAt && RegExp(r'^\d{1,4}$').hasMatch(line0)) {
+      out.location += line0;
+      continue;
+    }
+    var line = line0
         .replaceAll(_weekRange, ' ')
         .replaceAll(_weekFirst, ' ')
         .replaceAll(_periodRange, ' ')
@@ -128,6 +142,8 @@ ParsedCell parseCellText(String raw) {
         .trim();
     line = line.replaceAll(RegExp(r'^[-–—~·,，、:：@#\s]+|[-–—~·,，、:：@#\s]+$'), '');
     if (line.isEmpty) continue;
+    // 纯符号行（如 “+”“-” 按钮）不是课程内容
+    if (!RegExp(r'[A-Za-z0-9\u4e00-\u9fa5]').hasMatch(line)) continue;
     if (_teacherHint.hasMatch(line0) && line.length <= 12) {
       out.teacher = line;
       continue;
@@ -166,6 +182,8 @@ ParsedCell parseCellText(String raw) {
       .replaceAll(_timeRange, '')
       .trim();
   if (out.name.length > 40) out.name = out.name.substring(0, 40);
+  // 「@教室」捕获可能带上格内空格（如 “南霄3 27”），去掉
+  out.location = out.location.replaceAll(RegExp(r'\s+'), '');
   return out;
 }
 
@@ -544,11 +562,13 @@ Map<int, double> headerAnchors(List<OcrTextLine> lines) {
 }
 
 /// 按「星期列头锚点 + 行标签」把 OCR 原始行重建为课程网格。
-/// 每列内部按垂直间距切成格子（一格=一门课，可跨多行节次）。
-List<Course> gridFromOcrLines(
+/// 每列内部切成格子（一格=一门课，可跨多行节次）。
+/// 除了课程列表，还尽力从行标签里识别截图自带作息时间
+/// （如 “1 08:00 08:45”），识别不到返回 null。
+(List<Course>, List<(int, int)>?) gridFromOcrLines(
     List<OcrTextLine> lines, Map<int, double> anchors, List<(int, int)> periods) {
   final sortedCols = anchors.entries.toList()..sort((a, b) => a.value.compareTo(b.value));
-  if (sortedCols.isEmpty) return const [];
+  if (sortedCols.isEmpty) return (const [], null);
   final boundaries = <double>[];
   for (var i = 0; i + 1 < sortedCols.length; i++) {
     boundaries.add((sortedCols[i].value + sortedCols[i + 1].value) / 2);
@@ -574,9 +594,62 @@ List<Course> gridFromOcrLines(
       weekdayFromHeaderToken(l.text) != null ||
       kWeekdayWords.keys.where(l.text.contains).length >= 2;
 
-  // 行标签（第一列左边）：节次
+  // 行标签（第一列左边）：节次数字和/或作息时间
   final labelLines = lines.where((l) => l.cx < lo0 && l.text.length <= 10).toList()
     ..sort((a, b) => a.top.compareTo(b.top));
+
+  // 从行标签里顺带识别作息时间：「1 / 08:00 / 08:45」竖排，时间跟在节次数字下面
+  final timeBuf = <int, List<int>>{};
+  int? lastNum;
+  double lastNumCy = -999;
+  for (final lab in labelLines) {
+    final t = lab.text.trim();
+    final single = RegExp(r'^(\d{1,2}):(\d{2})$').firstMatch(t);
+    final pair = RegExp(r'^(\d{1,2}):(\d{2})\s+(\d{1,2}):(\d{2})$').firstMatch(t);
+    if (single != null || pair != null) {
+      if (lastNum == null || (lab.cy - lastNumCy).abs() > avgH * 4) continue;
+      void add(int h, int m) {
+        if (h < 24 && m < 60) timeBuf.putIfAbsent(lastNum!, () => []).add(h * 60 + m);
+      }
+      if (pair != null) {
+        add(int.parse(pair.group(1)!), int.parse(pair.group(2)!));
+        add(int.parse(pair.group(3)!), int.parse(pair.group(4)!));
+      } else {
+        add(int.parse(single!.group(1)!), int.parse(single.group(2)!));
+      }
+      continue;
+    }
+    final (lsp, _) = _labelPeriods(t);
+    if (lsp != null) {
+      lastNum = lsp;
+      lastNumCy = lab.cy;
+    }
+  }
+  List<(int, int)>? detected;
+  if (timeBuf.length >= 3) {
+    final nums = timeBuf.keys.toList()..sort();
+    var ok = nums.first == 1;
+    for (var i = 1; i < nums.length; i++) {
+      if (nums[i] != nums[i - 1] + 1) ok = false;
+    }
+    final built = <(int, int)>[];
+    (int, int)? prev;
+    for (final n in nums) {
+      final ts = timeBuf[n]!..sort();
+      var st = ts.first, en = ts.last;
+      if (en < st) (st, en) = (en, st);
+      if (prev != null && st <= prev.$1) ok = false;
+      // 个别节次缺时间（极少）：沿用上一节时长补齐
+      while (ok && built.length + 1 < n) {
+        final dur = prev == null ? 45 : prev.$2 - prev.$1;
+        final base = prev?.$2 ?? 525;
+        built.add((base + 1, base + 1 + (dur <= 0 ? 45 : dur)));
+      }
+      built.add((st, en));
+      prev = (st, en);
+    }
+    if (ok) detected = built;
+  }
 
   final byCol = <int, List<OcrTextLine>>{};
   for (final l in lines) {
@@ -589,17 +662,51 @@ List<Course> gridFromOcrLines(
   final out = <Course>[];
   for (final e in byCol.entries) {
     final colLines = e.value..sort((a, b) => a.top.compareTo(b.top));
+
+    // 先把列内文本行切成格子组：
+    // 1) 行距突变（格子之间有空隙）；2) 这类 App 的格子紧贴着排，
+    //    靠「@教室」行做边界——@ 行（及其后续门牌号数字行）之后
+    //    出现新的文字行就是下一门课。
+    final groups = <List<OcrTextLine>>[];
     var group = <OcrTextLine>[];
-    void flushGroup() {
-      if (group.isEmpty) return;
-      final top = group.map((g) => g.top).reduce(math.min);
-      final bottom = group.map((g) => g.bottom).reduce(math.max);
-      final text = group.map((g) => g.text).join('\n');
+    var seenRoom = false;
+    for (final l in colLines) {
+      final t = l.text.trim();
+      final isRoom = t.contains('@');
+      final digitCont = seenRoom && !isRoom && RegExp(r'^\d{1,4}$').hasMatch(t);
+      final hasInfo = t.contains('周') || t.contains('节') || _timeRange.hasMatch(t);
+      final hasText = RegExp(r'[A-Za-z0-9\u4e00-\u9fa5]').hasMatch(t);
+      final gapSplit = group.isNotEmpty && l.top - group.last.bottom > cellGap;
+      final roomSplit = group.isNotEmpty && seenRoom && hasText && !digitCont && !hasInfo;
+      if (gapSplit || roomSplit) {
+        groups.add(group);
+        group = <OcrTextLine>[];
+        seenRoom = false;
+      }
+      group.add(l);
+      if (isRoom) seenRoom = true;
+    }
+    if (group.isNotEmpty) groups.add(group);
+
+    for (var gi = 0; gi < groups.length; gi++) {
+      final g = groups[gi];
+      final top = g.map((x) => x.top).reduce(math.min);
+      final bottom = g.map((x) => x.bottom).reduce(math.max);
+      final text = g.map((x) => x.text).join('\n');
       final p = parseCellText(text);
-      // 找覆盖这个 y 区间的行标签 → 节次
+      // 找覆盖这个 y 区间的行标签 → 节次。
+      // 跨多行的大格子文字只占上半部分：若下一组紧贴着（间隙很小），
+      // 用下一组的顶端当本格底边，节次能认得更全。
+      var labelHi = bottom + cellGap;
+      if (gi + 1 < groups.length) {
+        final nextTop = groups[gi + 1].map((x) => x.top).reduce(math.min);
+        if (nextTop >= bottom && nextTop - bottom <= avgH * 2.5) {
+          labelHi = math.max(labelHi, nextTop - 1);
+        }
+      }
       int? sp, ep;
       for (final lab in labelLines) {
-        if (lab.cy >= top - cellGap && lab.cy <= bottom + cellGap) {
+        if (lab.cy >= top - cellGap && lab.cy <= labelHi) {
           final (lsp, lep) = _labelPeriods(lab.text);
           if (lsp != null) {
             if (sp == null) {
@@ -625,10 +732,12 @@ List<Course> gridFromOcrLines(
         sm = t.$1;
         em = t.$2;
       } else {
-        group = <OcrTextLine>[];
-        return;
+        continue;
       }
-      if (p.name.isNotEmpty && weekdayFromWord(p.name) == null) {
+      // 名字得有汉字/字母，过滤「+」之类的按钮误识别
+      if (p.name.isNotEmpty &&
+          weekdayFromWord(p.name) == null &&
+          RegExp(r'[A-Za-z\u4e00-\u9fa5]').hasMatch(p.name)) {
         out.add(Course(
           name: p.name,
           teacher: p.teacher,
@@ -640,16 +749,7 @@ List<Course> gridFromOcrLines(
           weekEnd: p.weekEnd,
         ));
       }
-      group = <OcrTextLine>[];
     }
-
-    for (final l in colLines) {
-      if (group.isNotEmpty && l.top - group.last.bottom > cellGap) {
-        flushGroup();
-      }
-      group.add(l);
-    }
-    flushGroup();
   }
-  return out;
+  return (out, detected);
 }
