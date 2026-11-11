@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:spreadsheet_decoder/spreadsheet_decoder.dart';
 
@@ -23,9 +24,12 @@ Future<List<Course>> parseCourseFile(String path, List<(int, int)> periods) asyn
   if (name.endsWith('.xlsx') || (bytes.length > 4 && bytes[0] == 0x50 && bytes[1] == 0x4B)) {
     try {
       final dec = SpreadsheetDecoder.decodeBytes(bytes);
-      final grid = _sheetToGrid(dec.tables[dec.tables.keys.first]?.rows);
-      final list = parseGrid(grid, periods);
+      final sheets = <String, List<List<String>>>{
+        for (final k in dec.tables.keys) k: _sheetToGrid(dec.tables[k]?.rows),
+      };
+      final list = aggregateWorkbook(sheets, periods);
       if (list.isNotEmpty) return list;
+      final grid = _sheetToGrid(dec.tables[dec.tables.keys.first]?.rows);
       return parseLooseText(grid.map((r) => r.join('\t')).join('\n'), periods);
     } catch (_) {
       // 掉到下面的通用尝试
@@ -126,6 +130,78 @@ List<List<String>> _sheetToGrid(List<List<dynamic>>? rows) {
       [for (final c in r) (c ?? '').toString()],
   ];
 }
+
+/// 把工作簿里所有 sheet 都解一遍再合并。
+/// 有的教务 App 导出的是「每周一页」：sheet 名叫 第1周~第20周，每周只有
+/// 该周上的课——只读第一个 sheet 会因为那一周恰好没课而「认不出课程」。
+/// sheet 名带「第N周」的，把同一门课在各个周的出现合并成连续周次范围；
+/// 不带的 sheet 直接并进结果。
+List<Course> aggregateWorkbook(
+    Map<String, List<List<String>>> sheets, List<(int, int)> periods) {
+  final plain = <Course>[];
+  final perWeek = <int, Map<String, Course>>{};
+  for (final e in sheets.entries) {
+    final list = parseGrid(e.value, periods);
+    if (list.isEmpty) continue;
+    final wk = _weekFromSheetName(e.key);
+    if (wk == null) {
+      plain.addAll(list);
+      continue;
+    }
+    final bucket = perWeek.putIfAbsent(wk, () => {});
+    for (final c in list) {
+      final key =
+          '${c.name}|${c.weekday}|${c.startMin}|${c.endMin}|${c.location}|${c.teacher}';
+      bucket[key] = c;
+    }
+  }
+  final agg = <String, Course>{};
+  // 不带周次的 sheet（汇总表/总课表）先入，避免被周次 sheet 挤出结果
+  for (final c in plain) {
+    final key =
+        '${c.name}|${c.weekday}|${c.startMin}|${c.endMin}|${c.location}|${c.teacher}';
+    agg[key] = c;
+  }
+  perWeek.forEach((wk, bucket) {
+    bucket.forEach((key, c) {
+      // 格子文本里明确写了周次（不是默认的 1-16）就以文本为准，
+      // 否则用 sheet 名里的周次
+      final hasOwnWeeks = c.weekStart != 1 || c.weekEnd != 16;
+      final ws = hasOwnWeeks ? c.weekStart : wk;
+      final we = hasOwnWeeks ? c.weekEnd : wk;
+      final prev = agg[key];
+      if (prev == null) {
+        agg[key] = _withWeeks(c, ws, we);
+      } else {
+        agg[key] = _withWeeks(prev, math.min(prev.weekStart, ws),
+            math.max(prev.weekEnd, we));
+      }
+    });
+  });
+  return agg.values.toList();
+}
+
+int? _weekFromSheetName(String name) {
+  final m = RegExp(r'第\s*(\d{1,2})\s*周').firstMatch(name) ??
+      RegExp(r'(\d{1,2})\s*周').firstMatch(name) ??
+      RegExp(r'week\s*(\d{1,2})', caseSensitive: false).firstMatch(name);
+  if (m == null) return null;
+  final v = int.tryParse(m.group(1)!);
+  return (v != null && v >= 1 && v <= 30) ? v : null;
+}
+
+Course _withWeeks(Course c, int ws, int we) => Course(
+      name: c.name,
+      teacher: c.teacher,
+      location: c.location,
+      weekday: c.weekday,
+      startMin: c.startMin,
+      endMin: c.endMin,
+      weekStart: ws,
+      weekEnd: we,
+      color: c.color,
+      remind: c.remind,
+    );
 
 /// 极简 CSV 解析：支持引号包裹、逗号/分号分隔
 List<List<String>> _decodeCsv(String raw) {

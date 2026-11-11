@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:class_reminder/models.dart';
 import 'package:class_reminder/services/timetable_parser.dart';
+import 'package:class_reminder/services/timetable_file_import.dart';
 
 final gdut = <(int, int)>[
   (510, 555), (560, 605), (625, 670), (675, 720),
@@ -214,6 +215,7 @@ void friendFormatTests() {
   });
 
   friend2FormatTests();
+  weeklyWorkbookTests();
 }
 
 /// 模拟第二位朋友的课表截图（WakeUp 风格）：
@@ -276,8 +278,7 @@ List<OcrTextLine> mockFriend2Timetable() {
   return lines;
 }
 
-void friend2FormatTests() {
-  test('紧贴格子 + 换行拆开的门牌号 + 「+」按钮的课表截图', () {
+void friend2FormatTests() {  test('紧贴格子 + 换行拆开的门牌号 + 「+」按钮的课表截图', () {
     final lines = mockFriend2Timetable();
     final anchors = headerAnchors(lines);
     expect(anchors.length, 7);
@@ -339,3 +340,74 @@ void friend2FormatTests() {
     expect(detected[12], (1095, 1140)); // 18:15-19:00
   });
 }
+
+/// 「每周一页」工作簿：模拟真实导出文件——20 个 sheet（第1周~第20周），
+/// 大多数周没课，只有第 5~7 周有一门 体育(1)（周二第6节）。
+void weeklyWorkbookTests() {
+  List<List<String>> weekSheet(List<String> courseCells) {
+    final header = ['节次\\星期', '周一', '周二', '周三', '周四', '周五', '周六', '周日'];
+    final rows = <List<String>>[header];
+    for (var i = 0; i < 12; i++) {
+      final row = List<String>.filled(8, '');
+      row[0] = '第${i + 1}节';
+      if (i >= 5 && i - 5 < courseCells.length) row[2] = courseCells[i - 5]; // 周二列，从第6节起
+      rows.add(row);
+    }
+    return rows;
+  }
+
+  test('每周一页的 xlsx：第一个 sheet 没课也能聚合出全部课程', () {
+    final sheets = <String, List<List<String>>>{};
+    for (var w = 1; w <= 20; w++) {
+      sheets['第$w周'] = weekSheet(
+          (w >= 5 && w <= 7) ? ['体育(1)'] : <String>[]);
+    }
+    final list = aggregateWorkbook(sheets, gdut);
+    expect(list.length, 1);
+    final pe = list.first;
+    expect(pe.name, '体育(1)');
+    expect(pe.weekday, 2); // 周二列
+    expect(pe.startMin, 880); // 第6节
+    expect(pe.endMin, 925);
+    expect(pe.weekStart, 5);
+    expect(pe.weekEnd, 7);
+  });
+
+  test('普通单 sheet 工作簿不受影响', () {
+    final sheets = <String, List<List<String>>>{
+      '课程表': [
+        ['节次\\星期', '周一', '周二', '周三', '周四', '周五'],
+        ['第1-2节', '高等数学 1-16周 教404', '', '大学英语 2-17周 文B302', '', ''],
+        ['第3-4节', '', '', '', '', '体育 3-16周 操场'],
+      ],
+    };
+    final list = aggregateWorkbook(sheets, gdut);
+    expect(list.length, 3);
+    expect(list.any((c) => c.name.contains('高等数学') && c.weekStart == 1 && c.weekEnd == 16), true);
+  });
+
+  test('sheet 名不带周次时直接并入；格子自带周次优先于 sheet 名', () {
+    final sheets = <String, List<List<String>>>{
+      '汇总': [
+        ['节次\\星期', '周一', '周二'],
+        ['第1-2节', '高数', ''],
+      ],
+      '第3周': [
+        ['节次\\星期', '周一', '周二'],
+        ['第1-2节', '', '英语 5-10周'],
+      ],
+      '第4周': [
+        ['节次\\星期', '周一', '周二'],
+        ['第1-2节', '', '英语 5-10周'],
+      ],
+    };
+    final list = aggregateWorkbook(sheets, gdut);
+    expect(list.length, 2);
+    final math = list.firstWhere((c) => c.name.contains('高数'));
+    expect(math.weekStart, 1);
+    final en = list.firstWhere((c) => c.name.contains('英语'));
+    expect(en.weekStart, 5); // 格子里写了 5-10周，优先于 sheet 名
+    expect(en.weekEnd, 10);
+  });
+}
+
