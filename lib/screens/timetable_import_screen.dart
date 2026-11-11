@@ -1,9 +1,12 @@
+import 'dart:io';
 import 'dart:math' as math;
-import 'dart:ui';
+import 'dart:typed_data';
+import 'dart:ui' as ui;
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
 
 import '../models.dart';
@@ -458,13 +461,17 @@ Future<String?> _pasteTextDialog(BuildContext context) {
 /// OCR：手机本地识别，不上传。
 /// 先按「周一~周日」列头锚点重建表格；失败就退回整段文本解析。
 Future<List<Course>> parseCourseImage(String path, List<(int, int)> periods) async {
-  final input = InputImage.fromFilePath(path);
+  final (input, tempFile) = await _normalizedInputImage(path);
   final recognizer = TextRecognizer(script: TextRecognitionScript.chinese);
   final RecognizedText result;
   try {
     result = await recognizer.processImage(input);
   } finally {
     await recognizer.close();
+    // 用完即删，不占缓存
+    if (tempFile != null) {
+      try { await tempFile.delete(); } catch (_) {}
+    }
   }
 
   // 拼行：同一水平线上的 element 合并成一行（中文不插空格）
@@ -495,12 +502,50 @@ class _OcrLine {
   final Rect box;
 }
 
+/// 把任意来源的图片（HEIF/微信图/带旋转元数据的照片等）规范化成一张
+/// 普通的 PNG（长边约 1600、无 EXIF 元数据），再交给 ML Kit。
+/// 部分机型上 `InputImage.fromFilePath` 直接喂原图会在原生层空指针
+/// 崩溃（`Object.getClass()' on a null object reference`），先用
+/// Flutter 自己解码重编码可以绕开这条坑路径。
+/// 返回 (规范化后的 InputImage, 需要清理的临时文件)。
+/// 临时文件为 null 表示直接用了原图，无需清理。
+Future<(InputImage, File?)> _normalizedInputImage(String path) async {
+  Uint8List bytes;
+  try {
+    bytes = await File(path).readAsBytes();
+  } catch (_) {
+    // 文件读不了就直接走原路径，让上层抛出可读的错误
+    return (InputImage.fromFilePath(path), null);
+  }
+
+  try {
+    final codec = await ui.instantiateImageCodec(
+      bytes,
+      targetWidth: 1600,
+      allowUpscaling: false,
+    );
+    final frame = await codec.getNextFrame();
+    final image = frame.image;
+    final comp = await image.toByteData(format: ui.ImageByteFormat.png);
+    image.dispose();
+    if (comp == null) throw Exception('图片编码失败');
+
+    final tmp = await getTemporaryDirectory();
+    final norm = File(
+        '${tmp.path}/ocr_norm_${DateTime.now().millisecondsSinceEpoch}.png');
+    await norm.writeAsBytes(comp.buffer.asUint8List());
+    return (InputImage.fromFilePath(norm.path), norm);
+  } catch (_) {
+    // 规范化失败（如极特殊的编码）：退回原路径尝试
+    return (InputImage.fromFilePath(path), null);
+  }
+}
+
 List<_OcrLine> _mergeLines(RecognizedText result) {
   final elems = <_OcrLine>[];
   for (final block in result.blocks) {
     for (final line in block.lines) {
       final box = line.boundingBox;
-      if (box == null) continue;
       final text = line.text.trim();
       if (text.isEmpty) continue;
       elems.add(_OcrLine(text, box));
