@@ -685,7 +685,14 @@ Map<int, double> headerAnchors(List<OcrTextLine> lines) {
 
   final out = <Course>[];
   for (final e in byCol.entries) {
-    final colLines = e.value..sort((a, b) => a.top.compareTo(b.top));
+    final colLines = e.value
+      ..sort((a, b) {
+        // 同一视觉行的元素 top 可能差 1~2px，按半行高聚带后再按 x 排，
+        // 保证「大学英语」「III-1」这类同层元素按从左到右拼接。
+        final band = (a.height + b.height) / 4;
+        final da = (a.cy / band).round().compareTo((b.cy / band).round());
+        return da != 0 ? da : a.left.compareTo(b.left);
+      });
 
     // 先把列内文本行切成格子组：
     // 1) 行距突变（格子之间有空隙）；2) 这类 App 的格子紧贴着排，
