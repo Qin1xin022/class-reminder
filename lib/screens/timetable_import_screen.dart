@@ -594,18 +594,38 @@ Future<(List<Course>, List<(int, int)>?, String)> parseCourseImage(
     }
   }
 
-  final raw = <OcrTextLine>[];
+  // 收集两种粒度：line（整行，有些截图会把同一水平带上的几个格子
+  // 横向合并成一行，列结构全丢）和 element（词组，每个都带独立坐标）。
+  // element 粒度更细，网格重建优先用它。
+  final raw = <OcrTextLine>[]; // line 级
+  final elems = <OcrTextLine>[]; // element 级
   for (final block in result.blocks) {
     for (final line in block.lines) {
       final t = line.text.trim();
-      if (t.isEmpty) continue;
-      final b = line.boundingBox;
-      raw.add(OcrTextLine(t, b.left, b.top, b.right, b.bottom));
+      if (t.isNotEmpty) {
+        final b = line.boundingBox;
+        raw.add(OcrTextLine(t, b.left, b.top, b.right, b.bottom));
+      }
+      for (final el in line.elements) {
+        final et = el.text.trim();
+        if (et.isEmpty) continue;
+        // 纯符号（表格竖线「|」之类）对解析没意义，丢掉
+        if (!RegExp(r'[A-Za-z0-9\u4e00-\u9fa5]').hasMatch(et)) continue;
+        final eb = el.boundingBox;
+        elems.add(OcrTextLine(et, eb.left, eb.top, eb.right, eb.bottom));
+      }
     }
   }
-  if (raw.isEmpty) return (<Course>[], null, '');
-  raw.sort((a, b) => a.top != b.top ? a.top.compareTo(b.top) : a.left.compareTo(b.left));
-  final rawText = raw.map((l) => l.text).join('\n');
+  if (raw.isEmpty && elems.isEmpty) return (<Course>[], null, '');
+  final rawText = raw.isNotEmpty
+      ? (raw
+          ..sort((a, b) => a.top != b.top ? a.top.compareTo(b.top) : a.left.compareTo(b.left)))
+          .map((l) => l.text)
+          .join('\n')
+      : (elems
+          ..sort((a, b) => a.top != b.top ? a.top.compareTo(b.top) : a.left.compareTo(b.left)))
+          .map((l) => l.text)
+          .join('\n');
 
   // 乱码防线：正常的课程名至少要有 2 个汉字（或 1 汉字+2 字母 / 4 字母的英文课名）。
   // 一张课表截图不可能超过 60 门课，超了说明整屏被识别成乱码，宁可返回空。
@@ -620,14 +640,21 @@ Future<(List<Course>, List<(int, int)>?, String)> parseCourseImage(
     return ok.length > 60 ? <Course>[] : ok;
   }
 
-  final anchors = headerAnchors(raw);
-  if (anchors.length >= 2) {
-    final (list, detected) = gridFromOcrLines(raw, anchors, periods);
+  // 依次尝试：element 级网格 → line 级网格 → 自由文本。
+  // element 级能对付「整行被横向合并」的截图；line 级保留给老格式。
+  final sources = <List<OcrTextLine>>[
+    if (elems.length >= raw.length || raw.length < 6) elems,
+    if (raw.length >= 6) raw,
+  ];
+  for (final src in sources) {
+    final anchors = headerAnchors(src);
+    if (anchors.length < 2) continue;
+    final (list, detected) = gridFromOcrLines(src, anchors, periods);
     final clean = sanitize(list);
     if (clean.isNotEmpty) {
       // 截图自带作息时间且与当前设置不同 → 按截图时间重算，课程时间更准
       if (detected != null && !_samePeriods(detected, periods)) {
-        final (list2, _) = gridFromOcrLines(raw, anchors, detected);
+        final (list2, _) = gridFromOcrLines(src, anchors, detected);
         final clean2 = sanitize(list2);
         if (clean2.length == clean.length) return (clean2, detected, rawText);
       }
@@ -635,9 +662,13 @@ Future<(List<Course>, List<(int, int)>?, String)> parseCourseImage(
     }
   }
   // 兜底：合并成整段文本按自由文本解析
-  final merged = mergeOcrLines(raw);
-  final loose = sanitize(parseLooseText(merged.map((l) => l.text).join('\n'), periods));
-  return (loose, null, rawText);
+  for (final src in [elems, raw]) {
+    if (src.isEmpty) continue;
+    final merged = mergeOcrLines(src);
+    final loose = sanitize(parseLooseText(merged.map((l) => l.text).join('\n'), periods));
+    if (loose.isNotEmpty) return (loose, null, rawText);
+  }
+  return (<Course>[], null, rawText);
 }
 
 bool _samePeriods(List<(int, int)> a, List<(int, int)> b) {
