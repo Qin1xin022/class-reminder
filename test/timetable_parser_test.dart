@@ -109,6 +109,8 @@ void main() {
 
     friendFormatTests();
   });
+
+  elementLevelTests();
 }
 
 /// 模拟「今日校园」式课表截图（列头带日期、"今天"列、行标签是裸数字、
@@ -474,3 +476,67 @@ void weeklyWorkbookTests() {
   });
 }
 
+
+/// 「小程序课表截图」的 element 级 OCR 模拟。
+/// 这类截图 ML Kit 会把同一水平带的多个格子横向合并成 line，
+/// 但 element（词组）各自带独立坐标。模拟：表头「周一~周日」+ 日期、
+/// 周三列头是「今天」、裸数字行标签、课名换行拆开、教室 @ 门牌号
+/// （个别门牌号跨行拆成 "@10-5" + "03"）。
+void elementLevelTests() {
+  double colX(int wd) => 100.0 + (wd - 1) * 100.0;
+  OcrTextLine el(String t, double cx, double top, {double w = 60, double h = 20}) =>
+      OcrTextLine(t, cx - w / 2, top, cx + w / 2, top + h);
+
+  test('element 级网格：今天列 + 裸数字标签 + 换行课名 + 拆行门牌号', () {
+    final elems = <OcrTextLine>[
+      // 表头：节/数 + 周一~周日 + 日期，周三列头是「今天」
+      el('节', 20, 40, w: 16), el('数', 20, 64, w: 16),
+      for (var wd = 1; wd <= 7; wd++) ...[
+        el(wd == 3 ? '今天' : '周$wd', colX(wd), 40, w: 44),
+        el('11/${8 + wd}', colX(wd), 64, w: 44),
+      ],
+      // 行标签 1~12（裸数字）
+      for (var p = 1; p <= 12; p++) el('$p', 20, 90.0 + (p - 1) * 55, w: 14),
+      // 周一 1-2节：大学生心理健康教育 @4-10（换行拆开）
+      el('大学生', colX(1), 92), el('心理健康', colX(1), 116), el('教育', colX(1), 140), el('@4-10', colX(1), 164),
+      // 周一 3-4节：C语言程序设计基础 @10-36
+      el('C语言', colX(1), 200), el('程序设计', colX(1), 224), el('基础', colX(1), 248), el('@10-36', colX(1), 272),
+      // 周二 1-2节：计算机系统导论 @10-309
+      el('计算机', colX(2), 92), el('系统导论', colX(2), 116), el('@10-309', colX(2), 140),
+      // 周三(今天) 1-2节：大学英语III-1 @10-503（门牌号拆两行）
+      el('大学英语', colX(3), 92), el('III-1', colX(3), 116, w: 40), el('@10-5', colX(3), 140), el('03', colX(3), 164, w: 26),
+      // 周四 1-2节：高等数学(1)(III)-1 @3-506
+      el('高等数学', colX(4), 92), el('(1)(III)-1', colX(4), 116, w: 70), el('@3-506', colX(4), 140),
+      // 周三 3-4节：高等数学(1)(III)-1 @3-507
+      el('高等数学', colX(3), 200), el('(1)(III)-1', colX(3), 224, w: 70), el('@3-507', colX(3), 248),
+      // 周五 9-10节（跨两行的大格子，文字只在上半部分）
+      el('大学生', colX(5), 530), el('职业发展', colX(5), 554), el('与就业指导', colX(5), 578),
+    ];
+
+    final anchors = headerAnchors(elems);
+    expect(anchors.length, 7, reason: '7 个列头锚点（周三靠日期/今天）');
+    final (list, detected) = gridFromOcrLines(elems, anchors, gdut);
+    expect(detected, isNull, reason: '行标签没有时间信息');
+    List<Course> find(int wd, String name) =>
+        list.where((c) => c.weekday == wd && c.name.contains(name)).toList();
+    final psych = find(1, '心理健康');
+    expect(psych.length, 1);
+    expect(psych.first.startMin, gdut[0].$1);
+    expect(psych.first.endMin, gdut[1].$2, reason: '跨 1-2 节');
+    expect(psych.first.location, '4-10');
+    final cLang = find(1, 'C语言');
+    expect(cLang.first.location, '10-36');
+    expect(cLang.first.startMin, gdut[2].$1);
+    final sysIntro = find(2, '系统导论');
+    expect(sysIntro.first.location, '10-309');
+    final en = find(3, '大学英语');
+    expect(en.first.location, '10-503', reason: '@10-5 + 03 续接');
+    final math = find(4, '高等数学');
+    expect(math.first.location, '3-506');
+    final career = find(5, '职业发展');
+    expect(career.first.startMin, gdut[8].$1);
+    expect(career.first.endMin, gdut[9].$2, reason: '跨 9-10 节');
+    expect(list.where((c) => c.weekday == 6 || c.weekday == 7).length, 0,
+        reason: '周六周日没课，不应凭空造课');
+  });
+}
