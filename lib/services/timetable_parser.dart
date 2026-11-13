@@ -443,12 +443,75 @@ List<Course> parseLooseText(String text, List<(int, int)> periods) {
 
 /// OCR 的一行文本及其包围盒（与具体 OCR 引擎解耦，方便单元测试）
 class OcrTextLine {
-  const OcrTextLine(this.text, this.left, this.top, this.right, this.bottom);
+  const OcrTextLine(this.text, this.left, this.top, this.right, this.bottom,
+      [this.symbols]);
   final String text;
   final double left, top, right, bottom;
+  /// 逐字符坐标（可选）。格子文字间无空格的课表，ML Kit 会把相邻列的
+  /// 文字拼进同一个 element，靠它把跨列的 element 拆回各列。
+  final List<OcrSymbolBox>? symbols;
   double get cx => (left + right) / 2;
   double get cy => (top + bottom) / 2;
   double get height => bottom - top;
+}
+
+/// 一个 OCR 字符（ML Kit symbol）及其坐标，用于切分跨列粘连的 element。
+class OcrSymbolBox {
+  const OcrSymbolBox(this.text, this.left, this.top, this.right, this.bottom);
+  final String text;
+  final double left, top, right, bottom;
+}
+
+final _borderChar = RegExp(r'[|｜│▏▕┃]');
+final _hasWordChar = RegExp(r'[A-Za-z0-9\u4e00-\u9fa5]');
+
+/// 把一个 OCR element 按字符间隙切成子 element。
+/// 这类课表的格子文字之间没有空格，ML Kit 会把相邻列的文字拼进同一个
+/// element（如周一「程序设」+周二「语-1」→「程序设语-1」）——文字已经
+/// 粘连，几何切列救不回来，只能靠逐字符坐标：格内字符几乎贴着
+/// （间隙 < 0.3 字高），格子边界的空隙明显更大（≥ 0.5 字高），按间隙切开。
+/// 空白字符和表格边框（|）视作天然分隔；产出不含任何文字的段会被丢弃。
+List<OcrTextLine> splitOcrElementByGaps(List<OcrSymbolBox> syms) {
+  final out = <OcrTextLine>[];
+  if (syms.isEmpty) return out;
+  final hs = <double>[];
+  for (final s in syms) {
+    final h = s.bottom - s.top;
+    if (h > 1) hs.add(h);
+  }
+  hs.sort();
+  final charH = hs.isNotEmpty ? hs[hs.length ~/ 2] : 20.0;
+  final gapTh = charH * 0.45;
+  var run = <OcrSymbolBox>[];
+  void flush() {
+    final cur = run;
+    run = [];
+    final buf = StringBuffer();
+    double? lo, hi, top, bot;
+    for (final s in cur) {
+      if (s.text.trim().isEmpty || _borderChar.hasMatch(s.text)) continue;
+      buf.write(s.text);
+      lo = lo == null ? s.left : math.min(lo, s.left);
+      hi = hi == null ? s.right : math.max(hi, s.right);
+      top = top == null ? s.top : math.min(top, s.top);
+      bot = bot == null ? s.bottom : math.max(bot, s.bottom);
+    }
+    final t = buf.toString().trim();
+    if (t.isEmpty || lo == null || !_hasWordChar.hasMatch(t)) return;
+    out.add(OcrTextLine(t, lo, top!, hi!, bot!, cur));
+  }
+
+  for (final s in syms) {
+    if (s.text.trim().isEmpty || _borderChar.hasMatch(s.text)) {
+      // 空白/边框字符本身是天然分隔
+      if (run.isNotEmpty) flush();
+      continue;
+    }
+    if (run.isNotEmpty && s.left - run.last.right > gapTh) flush();
+    run.add(s);
+  }
+  if (run.isNotEmpty) flush();
+  return out;
 }
 
 bool _startsLatin(String t) => RegExp(r'^[A-Za-z0-9]').hasMatch(t);
@@ -900,9 +963,38 @@ List<(double, double, int)>? _pickColumnBands(
 
   final byCol = <int, List<OcrTextLine>>{};
   for (final l in gridLines) {
-    final col = colOf(l.cx);
-    if (col == null) continue;
-    byCol.putIfAbsent(col.toInt(), () => []).add(l);
+    final syms = l.symbols;
+    final cl = syms == null ? null : colOf(l.left);
+    final cr = syms == null ? null : colOf(l.right);
+    // 不跨列（或没有逐字符坐标）：整条按中心归列
+    if (syms == null || syms.length < 2 || cl == null || cr == null || cl == cr) {
+      final col = colOf(l.cx);
+      if (col == null) continue;
+      byCol.putIfAbsent(col.toInt(), () => []).add(l);
+      continue;
+    }
+    // 跨列粘连的 element（格子文字间无空格时 ML Kit 会把相邻列文字拼进
+    // 同一段）：按每个字符的 x 归属列拆开，拼回各列的子行
+    final texts = <int, StringBuffer>{};
+    final boxes = <int, List<double>>{};
+    for (final s in syms) {
+      if (s.text.trim().isEmpty || _borderChar.hasMatch(s.text)) continue;
+      final col = colOf((s.left + s.right) / 2) ?? colOf(s.left) ?? colOf(s.right);
+      if (col == null) continue;
+      final c = col.toInt();
+      texts.putIfAbsent(c, () => StringBuffer()).write(s.text);
+      final b = boxes.putIfAbsent(c, () => [s.left, s.right, s.top, s.bottom]);
+      b[0] = math.min(b[0], s.left);
+      b[1] = math.max(b[1], s.right);
+      b[2] = math.min(b[2], s.top);
+      b[3] = math.max(b[3], s.bottom);
+    }
+    for (final e in texts.entries) {
+      final t = e.value.toString();
+      if (!_hasWordChar.hasMatch(t)) continue;
+      final b = boxes[e.key]!;
+      byCol.putIfAbsent(e.key, () => []).add(OcrTextLine(t, b[0], b[2], b[1], b[3]));
+    }
   }
 
   final out = <Course>[];
