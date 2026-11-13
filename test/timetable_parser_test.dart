@@ -114,6 +114,7 @@ void main() {
   elementLevelTests();
   wakeUpFormatTests();
   queryAppFormatTests();
+  symbolSplitTests();
 }
 
 /// 模拟「课表查询」App 截图（第三位朋友，21 门课）的真实布局：
@@ -128,7 +129,8 @@ List<OcrTextLine> mockQueryAppTimetable() {
   final lines = <OcrTextLine>[];
 
   OcrTextLine el(String t, double cx, double top, {double? w, double h = lineH}) {
-    w ??= t.length * 11.3;
+    // 真实 OCR 元素不会比格子宽（列距 57.5），宽了会跨列造成假阳性
+    w ??= math.min(t.length * 11.3, 50);
     return OcrTextLine(t, cx - w / 2, top, cx + w / 2, top + h);
   }
 
@@ -765,5 +767,52 @@ void elementLevelTests() {
     expect(career.first.endMin, gdut[9].$2, reason: '跨 9-10 节');
     expect(list.where((c) => c.weekday == 6 || c.weekday == 7).length, 0,
         reason: '周六周日没课，不应凭空造课');
+  });
+}
+
+/// 真机反馈（v1.13.12）：这类课表格子文字间没有空格，ML Kit 会把相邻列的
+/// 文字拼进同一个 element（「程序设语-1」= 周一+周二），识别结果大量跨列
+/// 粘连、只剩 11 门。element 下的 symbol（逐字符）带独立坐标，格子边界的
+/// 物理间隙能把它切开。
+void symbolSplitTests() {
+  test('跨列粘连 element（逐字符间隙切分）也能认出 21 门课', () {
+    final lines = mockQueryAppTimetable();
+    // 按 top 把栅格行上的元素粘连成跨列长 element + 逐字符 symbol 框
+    // （模拟 ML Kit 对无空格中文的真实输出）
+    final byTop = <double, List<OcrTextLine>>{};
+    for (final l in lines) {
+      byTop.putIfAbsent(l.top, () => []).add(l);
+    }
+    final merged = <OcrTextLine>[];
+    for (final row in byTop.values) {
+      if (row.length == 1) {
+        merged.add(row.first);
+        continue;
+      }
+      row.sort((a, b) => a.left.compareTo(b.left));
+      final syms = <OcrSymbolBox>[];
+      for (final el in row) {
+        final n = el.text.length;
+        final w = (el.right - el.left) / n;
+        for (var i = 0; i < n; i++) {
+          syms.add(OcrSymbolBox(
+              el.text[i], el.left + i * w, el.top, el.left + (i + 1) * w, el.bottom));
+        }
+      }
+      merged.addAll(splitOcrElementByGaps(syms));
+    }
+    final anchors = headerAnchors(merged);
+    expect(anchors.length, 7);
+    final (list, _) = gridFromOcrLines(merged, anchors, gdut);
+    expect(list.length, 21, reason: '粘连 element 切开后应复原全部 21 门课');
+    Course find(String name, int wd) =>
+        list.firstWhere((c) => c.name == name && c.weekday == wd);
+    // 周一 3-4 节的 C 语言和 周二 的大学英语不再缝在一起
+    // （空格字符在逐字符切分时是天然分隔，重组后 CJK 前不补空格）
+    expect(find('C语言程序设计基础', 1).location, '10-3');
+    expect(find('大学英语III-1', 2).location, '3-506');
+    expect(find('计算机系统导论', 1).location, '7-406');
+    expect(find('排球俱乐部-1', 2).location, '排球场');
+    expect(list.where((c) => c.weekday == 6 || c.weekday == 7), isEmpty);
   });
 }
