@@ -614,7 +614,19 @@ Future<(List<Course>, List<(int, int)>?, String)> parseCourseImage(
         // 纯符号（表格竖线「|」之类）对解析没意义，丢掉
         if (!RegExp(r'[A-Za-z0-9\u4e00-\u9fa5]').hasMatch(et)) continue;
         final eb = el.boundingBox;
-        elems.add(OcrTextLine(et, eb.left, eb.top, eb.right, eb.bottom));
+        final syms = el.symbols;
+        if (syms.length >= 2) {
+          // 中文字符间没有空格分隔，相邻列的文字可能被 ML Kit 拼进同一个
+          // element（如周一「程序设」+周二「语-1」→「程序设语-1」）；
+          // 逐字符坐标在格子边界处有物理间隙，按间隙切开
+          elems.addAll(splitOcrElementByGaps([
+            for (final s in syms)
+              OcrSymbolBox(s.text, s.boundingBox.left, s.boundingBox.top,
+                  s.boundingBox.right, s.boundingBox.bottom),
+          ]));
+        } else {
+          elems.add(OcrTextLine(et, eb.left, eb.top, eb.right, eb.bottom));
+        }
       }
     }
   }
