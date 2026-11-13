@@ -20,6 +20,7 @@ class ParsedCell {
 }
 
 final _weekRange = RegExp(r'(\d{1,2})\s*[-–—~至到]\s*(\d{1,2})\s*周');
+bool ocrDebug = false;
 final _weekSingle = RegExp(r'(?:第\s*)?(\d{1,2})\s*周');
 final _weekFirst = RegExp(r'第\s*(\d{1,2})\s*周');
 final _periodRange = RegExp(r'第?\s*(\d{1,2})\s*[-–—~至到]\s*(\d{1,2})\s*节');
@@ -148,6 +149,11 @@ ParsedCell parseCellText(String raw) {
       out.teacher = line;
       continue;
     }
+    // 「@教室」行之后的短行（如换行拆开的“场”“-309”）是地点续接
+    if (seenAt && line0.length <= 4 && !RegExp(r'[周节]|:').hasMatch(line0)) {
+      out.location += line0;
+      continue;
+    }
     // “@教室”格式下地点已经取到了，整行只可能是课程名片段
     if (atM == null && _locationHint.hasMatch(line0) && line.length <= 20) {
       out.location = out.location.isEmpty ? line : out.location;
@@ -156,11 +162,12 @@ ParsedCell parseCellText(String raw) {
     leftovers.add(line);
   }
   // 老师的兜底：有名字候选的前提下，形如 2~4 个汉字、以常见姓氏开头、
-  // 且比名字短的独立短行才认，避免把「高等数学」「心理健康」这种当老师
+  // 且比名字短的独立短行才认，避免把「高等数学」「心理健康」这种当老师。
+  // 「课程名@教室」格式的截图里没有老师行，短行都是课名片段，不做兜底。
   const kSurnames = '王李张刘陈杨赵黄周吴徐孙马朱胡郭何高林罗郑梁谢宋唐许韩冯邓'
       '曹彭曾肖田董袁潘于蒋蔡余杜叶程苏魏吕丁任沈姚卢姜崔钟谭陆汪范金石廖贾夏'
       '韦付方白邹孟熊秦邱江尹薛闫段雷侯龙史陶黎贺顾毛郝龚邵万钱严覃武戴莫孔向汤';
-  if (out.teacher.isEmpty && leftovers.length >= 2) {
+  if (out.teacher.isEmpty && atM == null && leftovers.length >= 2) {
     final nameLen = leftovers.first.length;
     for (final line in leftovers.skip(1)) {
       if (RegExp(r'^[\u4e00-\u9fa5]{2,4}$').hasMatch(line) &&
@@ -608,8 +615,9 @@ Map<int, double> headerAnchors(List<OcrTextLine> lines) {
 /// 把 OCR 元素的 x 区间投影聚成「列带」：课表格子纵向对齐，
 /// 同一列的元素横向大量重叠，列与列之间有空隙。
 /// 做法：扫描线求「覆盖数 ≥ 2」的密集段做核心（单个横跨整行的元素
-/// 不会把相邻列粘起来），很近的核心合并成列，再按成员元素撑满左右边界。
-/// 返回按 x 排序的 (left, right) 列表。
+/// 不会把相邻列粘起来），很近的核心合并成列。
+/// 返回按 x 排序的 (left, right) 列表。注意：核心比真实列窄，
+/// 元素按中心就近归属（见 gridFromOcrLines 的 colOf）。
 List<(double, double)> ocrColumnBands(List<OcrTextLine> lines, double avgH) {
   final ivs = <(double, double)>[];
   for (final l in lines) {
@@ -636,7 +644,8 @@ List<(double, double)> ocrColumnBands(List<OcrTextLine> lines, double avgH) {
     }
   }
   if (cores.isEmpty) return const [];
-  // 同一列不同行的核心偶尔断开，间隙很小（远小于列间空隙）才合并
+  // 同一列不同行的核心偶尔断开，间隙很小（远小于列间空隙）才合并。
+  // 不做「按成员撑满边界」——宽元素会把相邻列链式粘成一条。
   final mergeGap = avgH * 0.3;
   final merged = <(double, double)>[cores.first];
   for (var i = 1; i < cores.length; i++) {
@@ -647,30 +656,27 @@ List<(double, double)> ocrColumnBands(List<OcrTextLine> lines, double avgH) {
       merged.add(cores[i]);
     }
   }
-  // 核心只覆盖文字重叠区，按成员元素撑满真实列宽
-  final full = merged.map((c) {
-    var lo = c.$1, hi = c.$2;
-    for (final iv in ivs) {
-      final cx = (iv.$1 + iv.$2) / 2;
-      if (cx >= c.$1 && cx <= c.$2) {
-        if (iv.$1 < lo) lo = iv.$1;
-        if (iv.$2 > hi) hi = iv.$2;
-      }
-    }
-    return (lo, hi);
-  }).toList()
-    ..sort((a, b) => a.$1.compareTo(b.$1));
-  // 撑满后可能重叠，重叠才合并（列间空隙不能被跨过去）
-  final out = <(double, double)>[full.first];
-  for (var i = 1; i < full.length; i++) {
-    final last = out.last;
-    if (full[i].$1 <= last.$2) {
-      out[out.length - 1] = (last.$1, math.max(last.$2, full[i].$2));
-    } else {
-      out.add(full[i]);
-    }
+  return merged;
+}
+
+/// 判断一条列带是不是「节次标签带」：成员里有一串连续的裸数字
+/// （1、2、3…，节数列的特征）。课程格子里偶尔也有数字行，
+/// 但凑不齐 5 个以上连续编号。
+bool _isPeriodLabelBand(List<OcrTextLine> lines, (double, double) band) {
+  final digits = <int>[];
+  for (final l in lines) {
+    if (l.cx < band.$1 || l.cx > band.$2) continue;
+    final m = RegExp(r'^\d{1,2}$').firstMatch(l.text.trim());
+    if (m == null) continue;
+    final v = int.tryParse(m.group(0)!);
+    if (v != null && v >= 1 && v <= 20) digits.add(v);
   }
-  return out;
+  if (digits.length < 5) return false;
+  digits.sort();
+  for (var i = 1; i < digits.length; i++) {
+    if (digits[i] != digits[i - 1] + 1) return false;
+  }
+  return true;
 }
 
 /// 从内容元素的 x 分布聚出课程列带，并用表头锚点给每条带标上星期。
@@ -680,15 +686,10 @@ List<(double, double, int)>? _pickColumnBands(
     List<OcrTextLine> lines, List<MapEntry<int, double>> anchors, double avgH) {
   final bands = ocrColumnBands(lines, avgH);
   if (bands.length < 3) return null;
-  // 宽度远小于中位数的窄带是节次标签列，不参与标星期
-  final ws = bands.map((b) => b.$2 - b.$1).toList()..sort();
-  final medW = ws[ws.length ~/ 2];
-  final cb = bands.where((b) => b.$2 - b.$1 >= medW * 0.55).toList()
+  // 节数标签带不参与标星期
+  final cb = bands.where((b) => !_isPeriodLabelBand(lines, b)).toList()
     ..sort((a, b) => a.$1.compareTo(b.$1));
-  final lb = bands.where((b) => b.$2 - b.$1 < medW * 0.55).toList();
   if (cb.length < 3) return null;
-  // 窄带必须都贴在内容区最左边，否则布局不合预期
-  if (lb.isNotEmpty && lb.any((b) => b.$2 > cb.first.$1 + avgH)) return null;
   // 锚点 → 距离最近的列带
   final matched = <(int, double)>[]; // (weekday, 锚点x)
   final matchedBandIdx = <int>{};
@@ -748,21 +749,54 @@ List<(double, double, int)>? _pickColumnBands(
       weekdayFromHeaderToken(l.text) != null ||
       kWeekdayWords.keys.where(l.text.contains).length >= 2;
 
+  // 周次/节次/时间信息（这种行是格子里的备注，不是新课的开头）
+  bool hasInfo(String t) =>
+      t.contains('周') || t.contains('节') || _timeRange.hasMatch(t);
+
+  // —— 网格 y 窗口：网格上方的标题栏/状态栏（「课表查询」「第10周」等）
+  // 和下方的页脚不参与列带与内容，否则会把相邻列桥接粘成一条 ——
+  final lo0Fallback = sortedCols.length >= 2
+      ? sortedCols[0].value -
+          ((sortedCols[0].value + sortedCols[1].value) / 2 - sortedCols[0].value)
+      : sortedCols[0].value - 40;
+  final hdrTops = lines.where(isHeaderLike).map((l) => l.top).toList();
+  final labelTops = <double>[];
+  var labelBottomMax = -1.0;
+  for (final l in lines) {
+    if (l.cx >= lo0Fallback) continue;
+    if (_labelPeriods(l.text.trim()).$1 != null) {
+      labelTops.add(l.top);
+      labelBottomMax = math.max(labelBottomMax, l.bottom);
+    }
+  }
+  labelTops.sort();
+  double labelPitch = 0;
+  final double? gridTop =
+      hdrTops.isNotEmpty ? hdrTops.reduce(math.min) - avgH * 0.3 : null;
+  double? gridBottom;
+  if (labelTops.length >= 3) {
+    final ds = <double>[
+      for (var i = 1; i < labelTops.length; i++) labelTops[i] - labelTops[i - 1]
+    ]..sort();
+    labelPitch = ds[ds.length ~/ 2];
+    gridBottom = labelBottomMax + labelPitch * 0.8;
+  }
+  bool inGrid(OcrTextLine l) =>
+      (gridTop == null || l.bottom > gridTop) &&
+      (gridBottom == null || l.top < gridBottom);
+
   // —— 列切分，首选「内容列带」方案：课表格子纵向对齐，同一列的元素横向
   // 高度重叠、列与列之间有空隙，按 x 投影聚出的列带比表头锚点的两两中点
   // 更可靠；表头锚点只负责给列带标星期。方案不可靠时退回表头中点边界。
-  final contentBands = _pickColumnBands(
-      lines.where((l) => !isHeaderLike(l)).toList(), sortedCols, avgH);
-  // 第一列的左边界：列带方案用第一条内容带的左缘；中点方案按与第二列的
-  // 间距对称外推，防止第一列内容被当标签丢掉
+  final gridLines = lines.where((l) => !isHeaderLike(l) && inGrid(l)).toList();
+  final contentBands = _pickColumnBands(gridLines, sortedCols, avgH);
+  // 第一列的左边界：列带方案用第一条内容带（核心）的左缘略放宽；
+  // 中点方案按与第二列的间距对称外推，防止第一列内容被当标签丢掉
   final double lo0;
   if (contentBands != null) {
-    lo0 = contentBands.first.$1;
+    lo0 = contentBands.first.$1 - avgH * 0.3;
   } else {
-    lo0 = sortedCols.length >= 2
-        ? sortedCols[0].value -
-            ((sortedCols[0].value + sortedCols[1].value) / 2 - sortedCols[0].value)
-        : sortedCols[0].value - 40;
+    lo0 = lo0Fallback;
   }
 
   int? colOf(double x) {
@@ -779,7 +813,7 @@ List<(double, double, int)>? _pickColumnBands(
           best = b.$3;
         }
       }
-      return bestD <= avgH * 0.6 ? best : null;
+      return bestD <= avgH * 1.2 ? best : null;
     }
     for (var i = 0; i < sortedCols.length; i++) {
       final lo = i == 0 ? lo0 : (sortedCols[i - 1].value + sortedCols[i].value) / 2;
@@ -849,8 +883,7 @@ List<(double, double, int)>? _pickColumnBands(
   }
 
   final byCol = <int, List<OcrTextLine>>{};
-  for (final l in lines) {
-    if (isHeaderLike(l)) continue; // 列头本身
+  for (final l in gridLines) {
     final col = colOf(l.cx);
     if (col == null) continue;
     byCol.putIfAbsent(col.toInt(), () => []).add(l);
@@ -877,11 +910,17 @@ List<(double, double, int)>? _pickColumnBands(
     for (final l in colLines) {
       final t = l.text.trim();
       final isRoom = t.contains('@');
-      final digitCont = seenRoom && !isRoom && RegExp(r'^\d{1,4}$').hasMatch(t);
-      final hasInfo = t.contains('周') || t.contains('节') || _timeRange.hasMatch(t);
+      // 「@教室」行之后的短行是换行拆开的地点续接（如 “场”“-309”“27”），
+      // 但必须是紧贴着的行——有间隙说明是下一门课的开头
+      final cont = seenRoom &&
+          !isRoom &&
+          !hasInfo(t) &&
+          group.isNotEmpty &&
+          l.top - group.last.bottom <= avgH * 0.45 &&
+          (RegExp(r'^-?\d{1,4}$').hasMatch(t) || t.length <= 2);
       final hasText = RegExp(r'[A-Za-z0-9\u4e00-\u9fa5]').hasMatch(t);
       final gapSplit = group.isNotEmpty && l.top - group.last.bottom > cellGap;
-      final roomSplit = group.isNotEmpty && seenRoom && hasText && !digitCont && !hasInfo;
+      final roomSplit = group.isNotEmpty && seenRoom && hasText && !cont && !hasInfo(t);
       if (gapSplit || roomSplit) {
         groups.add(group);
         group = <OcrTextLine>[];
@@ -894,18 +933,23 @@ List<(double, double, int)>? _pickColumnBands(
 
     for (var gi = 0; gi < groups.length; gi++) {
       final g = groups[gi];
+      if (ocrDebug) {
+        // ignore: avoid_print
+        print('DBG col=${e.key} group=${g.map((x) => x.text).join('/')}');
+      }
       final top = g.map((x) => x.top).reduce(math.min);
       final bottom = g.map((x) => x.bottom).reduce(math.max);
       final text = g.map((x) => x.text).join('\n');
       final p = parseCellText(text);
       // 找覆盖这个 y 区间的行标签 → 节次。
       // 跨多行的大格子文字只占上半部分：若下一组紧贴着（间隙很小），
-      // 用下一组的顶端当本格底边，节次能认得更全。
+      // 用下一组的顶端所在行的行首当本格底边，节次能认得更全
+      // （切口不能吃进下一组的行标签）。
       var labelHi = bottom + cellGap;
       if (gi + 1 < groups.length) {
         final nextTop = groups[gi + 1].map((x) => x.top).reduce(math.min);
         if (nextTop >= bottom && nextTop - bottom <= avgH * 2.5) {
-          labelHi = math.max(labelHi, nextTop - 1);
+          labelHi = math.max(labelHi, nextTop - (labelPitch > 0 ? labelPitch * 0.35 : 1));
         }
       }
       int? sp, ep;
