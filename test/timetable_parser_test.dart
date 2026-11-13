@@ -113,6 +113,124 @@ void main() {
 
   elementLevelTests();
   wakeUpFormatTests();
+  queryAppFormatTests();
+}
+
+/// 模拟「课表查询」App 截图（第三位朋友，21 门课）的真实布局：
+/// 蓝色标题栏（课表查询/第10周（本周）/状态栏）在网格上方；
+/// 列头周X+日期、「今天」列；格子彩色紧贴、文字白色居中、行距 19.5、
+/// 行高 55.4；周五列有 2 门课、周六周日全空；周三列 9-10 节有
+/// 排球第一课堂@一啪 + 太极拳（第一周）两个叠着的格子。
+List<OcrTextLine> mockQueryAppTimetable() {
+  double colX(int wd) => 73.5 + (wd - 1) * 57.5;
+  const lineH = 19.5, rowPitch = 55.4;
+  double rowTop(int p) => 218.3 + (p - 1) * rowPitch;
+  final lines = <OcrTextLine>[];
+
+  OcrTextLine el(String t, double cx, double top, {double? w, double h = lineH}) {
+    w ??= t.length * 11.3;
+    return OcrTextLine(t, cx - w / 2, top, cx + w / 2, top + h);
+  }
+
+  // 蓝色区域（网格上方）：状态栏、标题、周次选择器
+  lines.add(const OcrTextLine('0:06', 20, 12, 52, 28));
+  lines.add(const OcrTextLine('课表查询', 25, 85, 145, 112));
+  lines.add(const OcrTextLine('第10周（本周）', 12, 150, 160, 185));
+  // 列头：节数 + 周X/今天 + 日期
+  const weekNames = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
+  lines.add(const OcrTextLine('节数', 12, 196, 38, 240));
+  for (var wd = 1; wd <= 7; wd++) {
+    lines.add(el(wd == 3 ? '今天' : weekNames[wd - 1], colX(wd), 195, w: 34));
+    lines.add(el('11/${8 + wd}', colX(wd), 222, w: 34));
+  }
+  // 行标签 1~12（裸数字）
+  for (var p = 1; p <= 12; p++) {
+    lines.add(OcrTextLine('$p', 8, rowTop(p) + 9, 30, rowTop(p) + 28.5));
+  }
+  // 格子：文字行距 19.5，从格子顶部 +21 开始
+  void cell(int wd, int startP, List<String> textLines, {double topShift = 21}) {
+    final cx = colX(wd);
+    final top = rowTop(startP) + topShift;
+    for (var j = 0; j < textLines.length; j++) {
+      lines.add(el(textLines[j], cx, top + j * lineH));
+    }
+  }
+
+  // 周一 5 门
+  cell(1, 1, ['大学生心', '理健康教', '育@4-10']);
+  cell(1, 3, ['C 语言', '程序设', '计基础', '@10-3']);
+  cell(1, 5, ['计算机', '系统导', '论@7-', '406']);
+  cell(1, 7, ['数字电', '路与数', '字逻辑', '@6-50']);
+  cell(1, 9, ['思想道', '德与法', '治@5-', '302']);
+  // 周二 5 门
+  cell(2, 1, ['计算机', '系统导', '论@10', '-309']);
+  cell(2, 3, ['大学英语', 'III-1@3-', '506']);
+  cell(2, 5, ['数字电', '路与数', '字逻辑', '@1-50']);
+  cell(2, 7, ['排球俱', '乐部-1', '@排球', '场']);
+  cell(2, 9, ['大学生', '职业发', '展与就', '业指导']);
+  // 周三（今天）4 门：太极拳叠在排球第一课堂下方（第 10 节内）
+  cell(3, 1, ['大学英', '语III-1', '@10-5', '03']);
+  cell(3, 3, ['高等数', '学(1)(1', 'II)-1@3-', '507']);
+  cell(3, 9, ['排球第', '一课堂', '@一啪']);
+  cell(3, 10, ['太极拳', '第一周'], topShift: 30);
+  // 周四 5 门
+  cell(4, 1, ['高等数', '学(1)(1', 'II)-1@3-', '506']);
+  cell(4, 3, ['C 语言', '程序设', '计基础', '@3-40']);
+  cell(4, 5, ['C 语言', '程序设', '计基础', '@2-30']);
+  cell(4, 7, ['形势与', '政策-1', '@3-20', '2']);
+  cell(4, 9, ['礼仪培', '训@4-', '201']);
+  // 周五 2 门；周六周日没课
+  cell(5, 3, ['数字电', '路与数', '字逻辑', '@6-50']);
+  cell(5, 5, ['计算机', '系统导', '论@7-', '406']);
+  return lines;
+}
+
+void queryAppFormatTests() {
+  test('课表查询 App 截图：21 门课全认出（含标题栏干扰与叠放格子）', () {
+    final lines = mockQueryAppTimetable();
+    final anchors = headerAnchors(lines);
+    expect(anchors.length, 7);
+    final (list, _) = gridFromOcrLines(lines, anchors, gdut);
+    expect(list.length, 21, reason: '21 门课一门不少，标题栏也不许造出假课');
+
+    Course find(String name, int wd) =>
+        list.firstWhere((c) => c.name == name && c.weekday == wd);
+
+    // 周一 5 门
+    final psych = find('大学生心理健康教育', 1);
+    expect(psych.location, '4-10');
+    expect(psych.startMin, 510);
+    expect(psych.endMin, 605);
+    final c10 = find('C 语言程序设计基础', 1);
+    expect(c10.location, '10-3');
+    expect(c10.startMin, 625);
+    expect(c10.endMin, 720);
+    expect(find('计算机系统导论', 1).location, '7-406');
+    expect(find('数字电路与数字逻辑', 1).startMin, 930);
+    final moral = find('思想道德与法治', 1);
+    expect(moral.location, '5-302');
+    expect(moral.startMin, 1040); // 从第 9 节起
+    expect(moral.endMin, 1155); // 文字只推到第 10 节，真实格子跨到 11 节，核对页可改
+    // 周二 5 门：换行拆开的门牌号要拼回去
+    expect(find('计算机系统导论', 2).location, '10-309');
+    expect(find('大学英语III-1', 2).location, '3-506');
+    expect(find('排球俱乐部-1', 2).location, '排球场', reason: '「场」续接地点');
+    expect(find('大学生职业发展与就业指导', 2).startMin, 1040);
+    // 周三 4 门：太极拳叠在第 10 节，要和排球第一课堂分开
+    expect(find('大学英语III-1', 3).location, '10-503');
+    expect(find('高等数学(1)(1 II)-1', 3).location, '3-507');
+    expect(find('排球第一课堂', 3).location, '一啪');
+    final tai = find('太极拳第一周', 3);
+    expect(tai.startMin, 1110); // 第 10 节
+    // 周四 5 门 + 周五 2 门
+    expect(find('形势与政策-1', 4).location, '3-202');
+    expect(find('礼仪培训', 4).location, '4-201');
+    expect(find('数字电路与数字逻辑', 5).startMin, 625);
+    expect(find('计算机系统导论', 5).startMin, 830);
+    // 周六周日没课；老师兜底不许吃掉课名片段
+    expect(list.where((c) => c.weekday == 6 || c.weekday == 7), isEmpty);
+    expect(list.every((c) => c.teacher.isEmpty), true);
+  });
 }
 
 /// 模拟「WakeUp 式彩色格子」截图（列与列之间有白色缝隙、格内文字居中、
