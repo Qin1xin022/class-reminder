@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:class_reminder/models.dart';
 import 'package:class_reminder/services/timetable_parser.dart';
@@ -111,6 +112,111 @@ void main() {
   });
 
   elementLevelTests();
+  wakeUpFormatTests();
+}
+
+/// 模拟「WakeUp 式彩色格子」截图（列与列之间有白色缝隙、格内文字居中、
+/// 节次标签列在最左）。旧版靠表头锚点中点切列，在这类截图上会把
+/// 相邻列粘成一列（20 多门课只认出 6 门）；现在用内容 x 投影列带切列。
+List<OcrTextLine> mockWakeUpTimetable({bool dropWeekendHeaders = false}) {
+  const labelX = 56.0;
+  double colX(int wd) => 190.0 + (wd - 1) * 200.0;
+  const rowH = 96.0;
+  double rowTop(int p) => 300.0 + (p - 1) * rowH;
+  final lines = <OcrTextLine>[];
+  // 表头：周X + 日期（周三列头是「今天」）
+  for (var wd = 1; wd <= 7; wd++) {
+    if (dropWeekendHeaders && wd >= 6) continue; // 周六/周日列头没认出来
+    lines.add(OcrTextLine(wd == 3 ? '今天' : '周$wd', colX(wd) - 36, 240, colX(wd) + 36, 272));
+    lines.add(OcrTextLine('11/${8 + wd}', colX(wd) - 36, 272, colX(wd) + 36, 300));
+  }
+  // 节次数字（窄窄地贴在最左边）
+  for (var p = 1; p <= 12; p++) {
+    lines.add(OcrTextLine('$p', labelX - 10, rowTop(p) + 8, labelX + 10, rowTop(p) + 34));
+  }
+  // 格子：文字在格内居中，格子之间留缝隙（列宽 190，相邻列中心差 200）
+  void cell(int wd, int startP, List<String> textLines) {
+    final cx = colX(wd);
+    final top = rowTop(startP) + 20; // 文字在格内大致居中
+    for (var j = 0; j < textLines.length; j++) {
+      final w = math.min(textLines[j].length * 22.0, 170.0); // 格内放不下会换行，不会跨列
+      lines.add(OcrTextLine(textLines[j], cx - w / 2, top + j * 30, cx + w / 2, top + j * 30 + 26));
+    }
+  }
+
+  cell(1, 1, ['大学生', '心理健康', '教育@4-10']);
+  cell(1, 3, ['C 语言', '程序设计', '基础@10-3']);
+  cell(1, 5, ['计算机', '系统导', '论@7-406']);
+  cell(1, 7, ['数字电', '路与数', '字逻辑@6-50']);
+  cell(1, 9, ['思想道', '德与法', '治@5-302']);
+  cell(2, 1, ['计算机', '系统导', '论@309']);
+  cell(2, 3, ['大学英语', 'III-1@3-506']);
+  cell(2, 5, ['数字电', '路与数', '字逻辑@1-50']);
+  cell(2, 7, ['排球俱', '乐部-1', '@排球场']);
+  cell(2, 9, ['大学生', '职业发展', '与就业指导']);
+  cell(3, 1, ['大学英语', 'III-1@10-', '503']);
+  cell(3, 3, ['高等数学', 'III-1@3-507']);
+  cell(3, 9, ['排球第', '一课堂', '@一啪']);
+  cell(4, 1, ['高等数学', 'III-1@3-506']);
+  cell(4, 3, ['C 语言', '程序设计', '基础@3-40']);
+  cell(4, 5, ['C 语言', '程序设计', '基础@2-30']);
+  cell(4, 7, ['形势与', '政策-1', '@3-202']);
+  cell(4, 9, ['礼仪培', '训@4-201']);
+  cell(6, 3, ['数字电', '路与数', '字逻辑@6-50']);
+  cell(6, 5, ['计算机', '系统导', '论@7-406']);
+  return lines;
+}
+
+void wakeUpFormatTests() {
+  void expectAllParsed(List<Course> list) {
+    expect(list.length, 20, reason: '20 门课一门不少，也没有跨列拼接');
+    Course find(String name, int wd) =>
+        list.firstWhere((c) => c.name == name && c.weekday == wd);
+
+    final psych = find('大学生心理健康教育', 1);
+    expect(psych.startMin, 510); // 第1-2节
+    expect(psych.endMin, 605);
+    expect(psych.location, '4-10');
+
+    final c1 = find('C 语言程序设计基础', 1);
+    expect(c1.location, '10-3');
+    expect(c1.startMin, 625);
+
+    final pe = find('排球俱乐部-1', 2);
+    expect(pe.location, '排球场');
+    expect(pe.startMin, 930); // 第7-8节
+
+    final en = find('大学英语III-1', 3);
+    expect(en.location, '10-503', reason: '@10- + 503 续接');
+
+    final cs = list.where((c) => c.name == 'C 语言程序设计基础' && c.weekday == 4).toList();
+    expect(cs.length, 2);
+    expect(cs[0].location, '3-40');
+    expect(cs[1].location, '2-30');
+    expect(cs[1].startMin, 830); // 第5-6节
+
+    // 名字没有被跨列拼接（拼接会产生超长乱名）
+    for (final c in list) {
+      expect(c.name.length, lessThan(16), reason: '名字可疑: ${c.name}');
+    }
+    expect(list.where((c) => c.weekday == 5 || c.weekday == 7), isEmpty);
+  }
+
+  test('WakeUp 式截图：列带切列，20 门课全认出', () {
+    final lines = mockWakeUpTimetable();
+    final anchors = headerAnchors(lines);
+    expect(anchors.length, 7);
+    final (list, _) = gridFromOcrLines(lines, anchors, gdut);
+    expectAllParsed(list);
+  });
+
+  test('周六/周日列头没认出来也能按位置补齐星期', () {
+    final lines = mockWakeUpTimetable(dropWeekendHeaders: true);
+    final anchors = headerAnchors(lines);
+    expect(anchors.length, 5);
+    final (list, _) = gridFromOcrLines(lines, anchors, gdut);
+    expectAllParsed(list);
+  });
 }
 
 /// 模拟「今日校园」式课表截图（列头带日期、"今天"列、行标签是裸数字、
