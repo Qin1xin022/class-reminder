@@ -37,6 +37,9 @@ final Map<String, int> kWeekdayWords = {
 
 int? weekdayFromWord(String raw) {
   final t = raw.trim();
+  // 「周一」常被 OCR 认成「周-」（一 → 横杠）；「周日」偶尔认成「周口」
+  if (RegExp(r'^周\s*[-–—1]$').hasMatch(t)) return 1;
+  if (RegExp(r'^周\s*[日口]$').hasMatch(t) && t != '周日') return 7;
   for (final e in kWeekdayWords.entries) {
     if (t.contains(e.key)) return e.value;
   }
@@ -108,9 +111,11 @@ ParsedCell parseCellText(String raw) {
   // 4) 逐行分类：课程名 / 老师 / 地点
   // “课程名@教室”格式（部分教务 App）：@ 后面是地点。
   // 门牌号可能被 OCR 换行拆开（如 “@南霄3” / “27”），纯数字短行要续接回去。
+  // 教室徽章的圆角边框可能被认成 “/”（如 “@//10-5/”），最后统一剔除。
   final atM = RegExp(r'@([^@\n]{1,30})').firstMatch(text);
-  if (atM != null) {
-    out.location = atM.group(1)!;
+  final atRooms = <String>[]; // 每个含「@教室」的行取到的地点（可跨行续接）
+  if (atM != null && atM.group(1)!.trim().isNotEmpty) {
+    atRooms.add(atM.group(1)!.trim());
   }
   final lines = text
       .split(RegExp(r'[\n;；]+'))
@@ -120,16 +125,19 @@ ParsedCell parseCellText(String raw) {
   final leftovers = <String>[];
   var seenAt = false; // 本格已出现过「@教室」行
   for (final line0 in lines) {
-    // 「@教室」行：@ 后面的内容已在 atM 里；@ 前面若还有文字则是课程名片段
+    // 「@教室」行：@ 后面的内容是地点；@ 前面若还有文字则是课程名片段
     if (line0.contains('@')) {
       seenAt = true;
-      final before = line0.substring(0, line0.indexOf('@')).trim();
+      final idx = line0.indexOf('@');
+      final before = line0.substring(0, idx).trim();
       if (before.isNotEmpty) leftovers.add(before);
+      final room = line0.substring(idx + 1).trim();
+      if (room.isNotEmpty) atRooms.add(room);
       continue;
     }
     // 换行拆开的门牌号：@ 行之后的纯数字短行续接地点
-    if (seenAt && RegExp(r'^\d{1,4}$').hasMatch(line0)) {
-      out.location += line0;
+    if (seenAt && atRooms.isNotEmpty && RegExp(r'^\d{1,4}$').hasMatch(line0)) {
+      atRooms[atRooms.length - 1] += line0;
       continue;
     }
     var line = line0
@@ -150,8 +158,8 @@ ParsedCell parseCellText(String raw) {
       continue;
     }
     // 「@教室」行之后的短行（如换行拆开的“场”“-309”）是地点续接
-    if (seenAt && line0.length <= 4 && !RegExp(r'[周节]|:').hasMatch(line0)) {
-      out.location += line0;
+    if (seenAt && atRooms.isNotEmpty && line0.length <= 4 && !RegExp(r'[周节]|:').hasMatch(line0)) {
+      atRooms[atRooms.length - 1] += line0;
       continue;
     }
     // “@教室”格式下地点已经取到了，整行只可能是课程名片段
@@ -189,8 +197,16 @@ ParsedCell parseCellText(String raw) {
       .replaceAll(_timeRange, '')
       .trim();
   if (out.name.length > 40) out.name = out.name.substring(0, 40);
-  // 「@教室」捕获可能带上格内空格（如 “南霄3 27”），去掉
-  out.location = out.location.replaceAll(RegExp(r'\s+'), '');
+  // 同一格可能混进相邻列的「@教室」行（x 切分误差，如 “@3-” 和 “@3-40”），
+  // 取最长的一个——被切短的让位给完整的门牌号
+  if (atRooms.isNotEmpty) {
+    atRooms.sort((a, b) => b.length.compareTo(a.length));
+    out.location = atRooms.first;
+  }
+  // 「@教室」捕获可能带上格内空格（如 “南霄3 27”）和徽章边框斜杠
+  // （如 “//10-5/”），去掉
+  out.location =
+      out.location.replaceAll(RegExp(r'\s+|[/\\|]+'), '');
   return out;
 }
 
@@ -920,7 +936,14 @@ List<(double, double, int)>? _pickColumnBands(
           (RegExp(r'^-?\d{1,4}$').hasMatch(t) || t.length <= 2);
       final hasText = RegExp(r'[A-Za-z0-9\u4e00-\u9fa5]').hasMatch(t);
       final gapSplit = group.isNotEmpty && l.top - group.last.bottom > cellGap;
-      final roomSplit = group.isNotEmpty && seenRoom && hasText && !cont && !hasInfo(t);
+      // 新行本身也是「@教室」行：是同一格混进的两条教室行（x 切分误差），
+      // 不拆组，交给 parseCellText 取最完整的一个
+      final roomSplit = group.isNotEmpty &&
+          seenRoom &&
+          hasText &&
+          !isRoom &&
+          !cont &&
+          !hasInfo(t);
       if (gapSplit || roomSplit) {
         groups.add(group);
         group = <OcrTextLine>[];
