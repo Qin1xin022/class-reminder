@@ -45,7 +45,10 @@ class RichEditorState extends State<RichEditor> {
 
   void _reset(String? content) {
     _lines = decodeRichDoc(content);
+    // 兜底：解析结果为空（异常数据）时至少给一个空行，避免越界灰屏
+    if (_lines.isEmpty) _lines = [RichLine()];
     _ctrls = _lines.map((l) => TextEditingController(text: l.text)).toList();
+    _focusIndex = 0;
   }
 
   @override
@@ -141,7 +144,16 @@ class RichEditorState extends State<RichEditor> {
               borderRadius: BorderRadius.circular(10),
               child: ConstrainedBox(
                 constraints: const BoxConstraints(maxHeight: 260),
-                child: Image.file(File(line.imagePath!), fit: BoxFit.contain),
+                child: Image.file(
+                  File(line.imagePath!),
+                  fit: BoxFit.contain,
+                  errorBuilder: (_, __, ___) => Container(
+                    height: 120,
+                    alignment: Alignment.center,
+                    color: context.divider,
+                    child: Text('图片丢失', style: TextStyle(fontSize: 13, color: context.sub)),
+                  ),
+                ),
               ),
             ),
             Positioned(
