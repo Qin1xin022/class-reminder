@@ -86,7 +86,12 @@ List<RichLine> decodeRichDoc(String? content) {
   if (!raw.startsWith('[')) return [RichLine(text: content ?? '')];
   try {
     final arr = jsonDecode(raw) as List<dynamic>;
-    return arr.map((e) => RichLine.fromMap(e as Map<Object?, Object?>)).toList();
+    // 空数组（历史版本保存 bug 存出的 "[]"）或全无效行 → 至少给一个空行
+    final lines = [
+      for (final e in arr)
+        if (e is Map) RichLine.fromMap(e),
+    ];
+    return lines.isEmpty ? [RichLine()] : lines;
   } catch (_) {
     return [RichLine(text: content ?? '')];
   }
@@ -94,8 +99,10 @@ List<RichLine> decodeRichDoc(String? content) {
 
 /// 行列表 → content 字符串
 String encodeRichDoc(List<RichLine> lines) {
-  final kept = lines.where((l) => !(l.isImage || l.text.trim().isNotEmpty)).toList();
-  if (kept.length == 1 && kept.first.fontSize == 16 && kept.first.styles.isEmpty) {
+  // 保留有内容的行：图片行，或文字非空的行
+  final kept = lines.where((l) => l.isImage || l.text.trim().isNotEmpty).toList();
+  if (kept.isEmpty) return '';
+  if (kept.length == 1 && !kept.first.isImage && kept.first.fontSize == 16 && kept.first.styles.isEmpty) {
     final l = kept.first;
     if (l.color == null && l.align == 0 && l.list == 0 && !l.todo) {
       return l.text; // 普通单行存纯文本，省空间也兼容旧展示
